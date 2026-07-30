@@ -18,26 +18,27 @@ an organization exposes its structure, knowledge, and access rules to AI agents.
 
 ---
 
-## Where this is going: [ocp.wiki](https://ocp.wiki)
+## Start at [ocp.wiki](https://ocp.wiki)
 
-*(Planned. The site is not live yet — this package ships ahead of it.)*
+**https://ocp.wiki** is where OCP lives in public: the specification, the conventions, and a
+working library of the patterns — free, for anyone.
 
-**https://ocp.wiki** will be the single entry point for OCP: the specification, the conventions,
-and the patterns — published as an OCP substrate rendered by this protocol's own renderer. The
-spec site is the worked example of the thing it documents.
-
-It is built for both audiences at once. A human browses it. An **agent fetches it** — which is
-the point. Any coding agent (Claude, ChatGPT/Codex, Cursor, …) should be able to take a single
-line:
+One address serves a reader and a machine. A person browses it; an **agent fetches it**. Give any
+coding agent (Claude, ChatGPT/Codex, Cursor, …) a single instruction:
 
 > Create our company knowledge base using the patterns from https://ocp.wiki
 
-…and cascade the rest itself: read the spec, scaffold with `npm create ocp`, lay out the
-recursive organizational structure, and fill it with the company's own content. One instruction
-in, a conformant, agent-readable knowledge base out.
+It takes it from there — reads the spec, scaffolds with `npm create ocp`, builds out the recursive
+organizational structure, and populates it with the company's own material. The result is a
+knowledge base the business hosts itself, that people and agents both read and write, whose access
+boundaries fall out of the org structure rather than being assembled by hand.
 
-That is the adoption thesis in one URL: **discovery, understanding, and implementation at the
-same address, for humans and agents alike.**
+The documents published there are load-bearing, not demonstrative: the SOPs, templates, and agent
+context currently running SalesBlaster and its white-label partners, along with the assets built
+on top of them.
+
+**Discovery, understanding, and implementation at the same address** — that is the whole adoption
+thesis.
 
 ## The axiom
 
@@ -96,4 +97,5 @@ version until `1.0`.
 MIT © 2026 Max Forbang. See [LICENSE](./LICENSE).
 
 OCP is a standard, not a product. It is free on purpose: a standard derives its value from
-adoption, not from exclusion.
+adoption, not from exclusion — and because the ten-fold leverage of agent-orchestrated work
+should reach the businesses that cannot buy their way to it, not only the ones that can.

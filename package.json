@@ -1,0 +1,42 @@
+{
+  "name": "ocp-core",
+  "version": "0.2.0",
+  "description": "The OCP (Organizational Context Protocol) projection library — walk a git-native markdown substrate, derive access policy, and produce scoped projections for humans and AI agents.",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT",
+  "author": "Max Forbang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/organizationalcontextprotocol/core.git"
+  },
+  "homepage": "https://github.com/organizationalcontextprotocol/core#readme",
+  "bugs": "https://github.com/organizationalcontextprotocol/core/issues",
+  "keywords": [
+    "ocp",
+    "organizational-context-protocol",
+    "context",
+    "markdown",
+    "substrate",
+    "projection",
+    "ai-agents",
+    "rbac",
+    "multi-tenant",
+    "knowledge-base"
+  ],
+  "files": [
+    "index.js"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

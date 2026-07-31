@@ -4,24 +4,6 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/organizationalcontextprotocol/core/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 
-> ## Internal beta - MVP, not production ready
->
-> **This is an internal beta MVP.** It is published to establish the package name and to exercise
-> the shape of the OCP surface against real canon - not to be depended on. The API will change
-> without notice, it implements only part of the protocol, and it has not been reviewed for
-> correctness, security, or disclosure safety.
->
-> **Do not ship this to clients or partners, or use it in production, without a full rework and
-> review first.** Specifically not yet done:
->
-> - **No renderer and no markdown compile.** `walk` and `project` produce a tree and page handles; turning a body into HTML is left entirely to the consumer.
-> - **No per-scope search index** (plan D11). `scopedCorpus` hands you the viewer's slice; building, caching, and invalidating an index over it is not in this package.
-> - **Access policy derivation is half-proven and half-undecided.** The cascading `visibility:` syntax has zero production data behind it (grounding F-038: no file in the 322-file reference substrate uses it), and the nested-org case is an open protocol question (F-016) that this package answers by failing closed — so a tenant nested two levels deep needs grants to its ancestor orgs to see its own content. See [Known limitation](#known-limitation-a-nested-tenant-needs-reach-to-its-ancestors).
-> - **One SubstratePort adapter only** (filesystem). There is no remote/GitHub adapter, so a substrate must be on local disk.
-> - **Conformance checking is partial.** It checks the invariants a linter can mechanically check, not the whole protocol, and it has no schema for per-type frontmatter. `npx ocp-core validate` runs exactly those checks from the command line — useful, not exhaustive.
-
----
-
 `ocp-core` is the projection library for the **Organizational Context Protocol** — an open
 specification for how an organization exposes its structure, knowledge, and access rules to AI
 agents.
@@ -839,7 +821,7 @@ across artifacts; and nothing in this package enforces that a consumer actually 
 ## Status
 
 Source lives in [organizationalcontextprotocol/core](https://github.com/organizationalcontextprotocol/core).
-The package is on npm at `0.2.x` while the protocol documentation and the reference renderer are
+The package is on npm at `0.3.x` while the protocol documentation and the reference renderer are
 built out. Expect breaking changes at every minor version until `1.0`.
 
 ## Related

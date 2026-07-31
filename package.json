@@ -1,6 +1,6 @@
 {
   "name": "ocp-core",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "The OCP (Organizational Context Protocol) projection library — walk a git-native markdown substrate, derive access policy, produce scoped projections, and validate conformance (npx ocp-core validate).",
   "main": "./index.js",
   "bin": {

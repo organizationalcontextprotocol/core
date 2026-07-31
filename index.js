@@ -18,8 +18,11 @@ const PROTOCOL = Object.freeze({
 // re-expressed as `role: report_definition` on `template`.
 const ARTIFACT_TYPES = Object.freeze(['note', 'adr', 'prompt', 'template', 'report']);
 
-// P4 / ADR-020 §7: five positional altitudes. Altitude is declared vocabulary, never
-// path-encoded — and the `org_type` frontmatter FIELD was retired 2026-07-21.
+// P4 / ADR-020 §7: five positional altitudes, exported as DESCRIPTIVE vocabulary for
+// consumers that render position labels. Nothing here validates against it, because no
+// artifact declares an altitude: the `org_type` field was retired 2026-07-21 and the whole
+// axis went out of frontmatter with it (never `altitude:` either, top-level or under
+// `metadata:`). The only structural fact an artifact records is `parent_org_id`.
 const ALTITUDES = Object.freeze(['platform', 'tenant', 'agency', 'account', 'user']);
 
 // ADR-020 §6: underscore-prefixed DIRECTORIES are substrate.

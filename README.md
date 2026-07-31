@@ -18,7 +18,7 @@
 > - **No per-scope search index** (plan D11). `scopedCorpus` hands you the viewer's slice; building, caching, and invalidating an index over it is not in this package.
 > - **Access policy derivation is half-proven and half-undecided.** The cascading `visibility:` syntax has zero production data behind it (grounding F-038: no file in the 322-file reference substrate uses it), and the nested-org case is an open protocol question (F-016) that this package answers by failing closed — so a tenant nested two levels deep needs grants to its ancestor orgs to see its own content. See [Known limitation](#known-limitation-a-nested-tenant-needs-reach-to-its-ancestors).
 > - **One SubstratePort adapter only** (filesystem). There is no remote/GitHub adapter, so a substrate must be on local disk.
-> - **Conformance checking is partial.** It checks the invariants a linter can mechanically check, not the whole protocol, and it has no schema for per-type frontmatter.
+> - **Conformance checking is partial.** It checks the invariants a linter can mechanically check, not the whole protocol, and it has no schema for per-type frontmatter. `npx ocp-core validate` runs exactly those checks from the command line — useful, not exhaustive.
 
 ---
 
@@ -108,6 +108,24 @@ npm install ocp-core
 
 Node.js 20 or newer. **Zero runtime dependencies, zero devDependencies.** CommonJS
 (`require`); it also works from ESM via the default import.
+
+## Validate a substrate
+
+The conformance checks also ship as a CLI. This is the loop-closer for agent scaffolding —
+generate, validate, fix, re-validate — and a drop-in check for CI:
+
+```sh
+npx ocp-core validate            # the current directory
+npx ocp-core validate my-org     # a specific substrate
+npx ocp-core validate --json     # machine-readable, for agents and pipelines
+```
+
+Exit code `0` means conformant (warnings allowed); `1` means errors, unreadable files, or the
+fail-soft halt threshold (>10% of files unparseable) was crossed. It runs the same
+`conformance(tree)` the library exports: entry-point READMEs, frontmatter, the closed
+artifact-type set, organization declarations, Core Canon blocks. An agent scaffolding a
+substrate (see [ocp.wiki/genesis.md](https://ocp.wiki/genesis.md)) should not report success
+until this prints `OK`.
 
 ## Quickstart
 
@@ -256,11 +274,14 @@ facts. The explicit empty state (`None declared yet.`) is conformant.
 `_users/` are metadata of the repository or definitions of the containing entity; un-prefixed
 directories are content. The underscore applies to directories, never to entry-point files.
 
-**Altitude is declared, not path-encoded.** Five positional altitudes exist as vocabulary —
+**Altitude is vocabulary, not schema.** Five positional altitudes exist as descriptive words —
 `platform`, `tenant`, `agency`, `account`, `user` — and a designer builds only the ones they
-need (a solo builder: 2; a direct agency: 3; a white-label: 4–5). The `org_type` frontmatter
-**field was retired 2026-07-21**; only root-vs-child survives, keyed on `parent_org_id == null`.
-`ocp-core` flags `org_type` as a warning if it finds it, and never authors it.
+need (a solo builder: 2; a direct agency: 3; a white-label: 4–5). They are written into **no
+file and read by no tool**: the `org_type` frontmatter **field was retired 2026-07-21** and the
+whole axis went with it, so `altitude:` is not authored either — not at the top level and not
+under `metadata:`. Only root-vs-child survives, keyed on `parent_org_id == null`. `ocp-core`
+flags `org_type` as a warning if it finds it, never authors it, and exports `ALTITUDES` purely
+as label vocabulary for renderers.
 
 ### Artifact types (P16)
 

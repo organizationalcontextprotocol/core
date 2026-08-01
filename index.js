@@ -1164,6 +1164,7 @@ function walk(substrate, config) {
   function build(dirPath, name, inherited, isRoot) {
     if (alreadyVisited(dirPath)) {
       discovered.push({
+        kind: 'directory',
         path: dirPath === '' ? '.' : dirPath,
         reason: 'symlink loop: this directory resolves to one already walked'
       });
@@ -1276,32 +1277,46 @@ function walk(substrate, config) {
   // directory, and the visited set is empty on this first call.
   const root = /** @type {OcpNode} */ (build('', '', { owningOrg: null, orgId: null, underOrgsDir: false }, true));
 
-  // COUNT PARITY (D12-R item 3). Every markdown file the walk read is either served as a
-  // page, served as a directory landing, or recorded as a failure. Nothing is dropped.
+  // COUNT PARITY (D12-R item 3), stated DIRECTIONALLY.
   //
-  // This is asserted rather than merely computed because the failure it guards against is
-  // a SILENT DROP, and a failure rate cannot surface one: a dropped file leaves both the
-  // numerator and the denominator, so `haltStatus` stays green while content disappears.
+  // The failure being guarded is a SILENT DROP: a file was read, never rendered, and
+  // never recorded. That is `filesSeen > accounted`, and it is the only direction that
+  // means data loss. The opposite direction means something was accounted for that was
+  // never counted as a file, which is an accounting artifact rather than lost content.
   //
-  // Note the shape carefully; two nearby identities are both wrong.
+  // This was an equality until 0.5.1 and it was wrong three times in one release cycle:
+  // the naive artifacts-plus-failures form, the directory-listing form, and the symlink
+  // form. Every one of those false alarms was OVER-accounting. An equality over a count
+  // with N contributors requires every future push site to remember to participate,
+  // which is distributed discipline, which is exactly what a chokepoint exists to
+  // replace. Directionality removes the whole category without weakening detection.
   //
-  // `filesSeen === artifacts + failures` is FALSE on every conformant substrate: a
-  // directory's README.md is read (so it counts in filesSeen) but becomes that directory
-  // node's `entryPoint` rather than a separate artifact node, leaving a residual equal to
-  // the number of directories carrying one.
-  //
-  // `filesSeen === rendered + discovered.length` is FALSE whenever a directory listing
-  // fails: that failure is recorded without any file having been read, so it inflates the
-  // right side only. The identity is over FILES, so only file-level failures belong in it.
+  // The `kind` partition is retained ON TOP of the directional test rather than replaced
+  // by it. Dropping it would lose the compensating case: one dropped file plus one
+  // directory-level failure cancel in an unpartitioned count, and the drop goes unseen.
   const renderedNodes = nodes.filter((node) => node.kind === 'artifact' || node.entryPoint !== null).length;
   const fileFailures = discovered.filter((entry) => entry.kind !== 'directory').length;
-  if (filesSeen !== renderedNodes + fileFailures) {
+  const accounted = renderedNodes + fileFailures;
+  if (filesSeen > accounted) {
     throw new Error(
-      `ocp-core walk count parity failed: read ${filesSeen} file(s) but accounted for ${renderedNodes + fileFailures} ` +
+      `ocp-core walk count parity failed: read ${filesSeen} file(s) but accounted for only ${accounted} ` +
         `(${renderedNodes} rendered + ${fileFailures} recorded as file failures). ` +
         'A file was read and then silently dropped, which is the one failure mode the fail-soft contract exists to prevent. ' +
         'This is a bug in ocp-core, not in the substrate; please report it with the substrate shape that triggered it.'
     );
+  }
+  if (accounted > filesSeen) {
+    // Not a drop, so not fatal. It is the canary for the next push site that forgets to
+    // declare its `kind`, which is precisely how the symlink-loop regression reached a
+    // published release. Recorded as a directory-kind entry so it can never cascade into
+    // fileFailures and re-trigger this same branch on a later walk.
+    discovered.push({
+      kind: 'directory',
+      path: '.',
+      reason:
+        `walk accounting imbalance: accounted for ${accounted} but read only ${filesSeen} file(s). ` +
+        'Not data loss; a discovered entry is most likely missing its `kind`.'
+    });
   }
 
   return {

@@ -766,7 +766,14 @@ function walk(substrate, config) {
     try {
       return substrate.list(dir);
     } catch (err) {
-      discovered.push({ path: dir === '' ? '.' : dir, reason: `directory listing failed: ${err.message}` });
+      // `kind` partitions discovered[] for the count-parity identity below: a directory
+      // that could not be enumerated is not a FILE that was read and then dropped, so it
+      // belongs to neither side of the file-level identity.
+      discovered.push({
+        kind: 'directory',
+        path: dir === '' ? '.' : dir,
+        reason: `directory listing failed: ${err.message}`
+      });
       return [];
     }
   }
@@ -779,13 +786,13 @@ function walk(substrate, config) {
     try {
       source = substrate.read(filePath);
     } catch (err) {
-      discovered.push({ path: filePath, reason: `read failed: ${err.message}` });
+      discovered.push({ kind: 'file', path: filePath, reason: `read failed: ${err.message}` });
       return null;
     }
     try {
       return parseArtifact(source, { path: filePath });
     } catch (err) {
-      discovered.push({ path: filePath, reason: `parse failed: ${err.message}` });
+      discovered.push({ kind: 'file', path: filePath, reason: `parse failed: ${err.message}` });
       return null;
     }
   }
@@ -936,6 +943,34 @@ function walk(substrate, config) {
 
   const root = build('', '', { owningOrg: null, orgId: null, underOrgsDir: false }, true);
 
+  // COUNT PARITY (D12-R item 3). Every markdown file the walk read is either served as a
+  // page, served as a directory landing, or recorded as a failure. Nothing is dropped.
+  //
+  // This is asserted rather than merely computed because the failure it guards against is
+  // a SILENT DROP, and a failure rate cannot surface one: a dropped file leaves both the
+  // numerator and the denominator, so `haltStatus` stays green while content disappears.
+  //
+  // Note the shape carefully; two nearby identities are both wrong.
+  //
+  // `filesSeen === artifacts + failures` is FALSE on every conformant substrate: a
+  // directory's README.md is read (so it counts in filesSeen) but becomes that directory
+  // node's `entryPoint` rather than a separate artifact node, leaving a residual equal to
+  // the number of directories carrying one.
+  //
+  // `filesSeen === rendered + discovered.length` is FALSE whenever a directory listing
+  // fails: that failure is recorded without any file having been read, so it inflates the
+  // right side only. The identity is over FILES, so only file-level failures belong in it.
+  const renderedNodes = nodes.filter((node) => node.kind === 'artifact' || node.entryPoint !== null).length;
+  const fileFailures = discovered.filter((entry) => entry.kind !== 'directory').length;
+  if (filesSeen !== renderedNodes + fileFailures) {
+    throw new Error(
+      `ocp-core walk count parity failed: read ${filesSeen} file(s) but accounted for ${renderedNodes + fileFailures} ` +
+        `(${renderedNodes} rendered + ${fileFailures} recorded as file failures). ` +
+        'A file was read and then silently dropped, which is the one failure mode the fail-soft contract exists to prevent. ' +
+        'This is a bug in ocp-core, not in the substrate; please report it with the substrate shape that triggered it.'
+    );
+  }
+
   return {
     root,
     nodes,
@@ -943,7 +978,11 @@ function walk(substrate, config) {
     discovered,
     sha: typeof substrate.sha === 'function' ? substrate.sha() : null,
     config: cfg,
-    stats: { filesSeen, directories: nodes.filter((node) => node.kind !== 'artifact').length }
+    stats: {
+      filesSeen,
+      directories: nodes.filter((node) => node.kind !== 'artifact').length,
+      rendered: renderedNodes
+    }
   };
 }
 
@@ -953,10 +992,26 @@ function walk(substrate, config) {
 
 function haltStatus(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
-  const failed = source.discovered.length;
+  const failures = source.discovered || [];
+  const failed = failures.length;
   const seen = source.stats.filesSeen;
-  const rate = seen === 0 ? 0 : failed / seen;
-  return { filesSeen: seen, failed, rate, threshold: HALT_THRESHOLD, halt: rate > HALT_THRESHOLD };
+  // A directory that could not be listed is a unit of work that failed while reading no
+  // file, so it must join the denominator as well as the numerator. Dividing by filesSeen
+  // alone admitted numerator entries the denominator never counted, and in the degenerate
+  // case (every listing fails, so no file is ever read) produced filesSeen 0, rate 0, and
+  // halt false: a substrate that could not be enumerated at all reported OK.
+  const directoryFailures = failures.filter((entry) => entry.kind === 'directory').length;
+  const denominator = seen + directoryFailures;
+  const rate = denominator === 0 ? 0 : failed / denominator;
+  return {
+    filesSeen: seen,
+    failed,
+    directoryFailures,
+    considered: denominator,
+    rate,
+    threshold: HALT_THRESHOLD,
+    halt: rate > HALT_THRESHOLD
+  };
 }
 
 function discoveredReport(tree) {
@@ -995,22 +1050,95 @@ function discoveredReport(tree) {
  * Policy + disclosure
  * ------------------------------------------------------------------ */
 
+/**
+ * Accepted `<prefix>:<id>` spellings. `org` is the canonical emission spelling per the
+ * 2026-07-31 ruling; the other three are ACCEPTED ALIASES retained under ADR-041's
+ * additive-only plus tolerant-reader policy, and the parser is deliberately not narrowed
+ * (narrowing an accepted input set is a breaking change with nothing on the other side).
+ *
+ * READER TRAP, stated here because every reader so far has hit it: `account`, `tenant`,
+ * and `agency` are ALSO OCP altitude terms (see ALTITUDES). Altitude and
+ * visibility-audience are different axes that happen to share three words. An altitude is
+ * a position in the org hierarchy, it is descriptive, and nothing validates against it
+ * because no artifact declares one. A visibility-audience token is authored per artifact,
+ * is parsed, and decides policy. They are unrelated.
+ */
 const VISIBILITY_ORG_PREFIXES = ['org', 'account', 'tenant', 'agency'];
+const VISIBILITY_CANONICAL_ORG_PREFIX = 'org';
+const VISIBILITY_BARE_TOKENS = ['public', 'unlisted', 'internal', 'platform'];
 
-function parseVisibility(value) {
+/**
+ * Restrictiveness, least to most. `visibility` names the AUDIENCE and a page has exactly
+ * one, so when several recognized tokens are declared the resolution is the most
+ * restrictive of them, and it is ORDER-INDEPENDENT. The previous first-match behavior
+ * made `[unlisted, public]` and `[public, unlisted]` mean different things, which is
+ * order-dependent semantics on a security field.
+ */
+const VISIBILITY_RANK = { public: 0, unlisted: 1, internal: 2, org: 3, platform: 4 };
+
+function visibilityRank(scope) {
+  if (scope && typeof scope === 'object' && typeof scope.org === 'string') return VISIBILITY_RANK.org;
+  return Object.prototype.hasOwnProperty.call(VISIBILITY_RANK, scope) ? VISIBILITY_RANK[scope] : -1;
+}
+
+/**
+ * Full analysis of a raw `visibility` frontmatter value. `parseVisibility` is the scope
+ * half of this; `conformance()` consumes the diagnostic half, which is what turns a
+ * misspelled token from a silent scope change into a reported error.
+ */
+function analyzeVisibility(value) {
   const entries = Array.isArray(value) ? value : value === null || value === undefined ? [] : [value];
+  const recognized = [];
+  const unrecognized = [];
+  const nonCanonicalPrefixes = [];
+  const orgIds = new Set();
+
   for (const raw of entries) {
     const token = stringOrNull(raw);
     if (token === null) continue;
-    if (token === 'public' || token === 'internal' || token === 'platform') return token;
+    if (VISIBILITY_BARE_TOKENS.includes(token)) {
+      recognized.push(token);
+      continue;
+    }
     const split = token.indexOf(':');
     if (split > 0) {
       const prefix = token.slice(0, split).trim();
       const id = token.slice(split + 1).trim();
-      if (VISIBILITY_ORG_PREFIXES.includes(prefix) && id) return { org: id };
+      if (VISIBILITY_ORG_PREFIXES.includes(prefix) && id) {
+        recognized.push({ org: id });
+        orgIds.add(id);
+        if (prefix !== VISIBILITY_CANONICAL_ORG_PREFIX) nonCanonicalPrefixes.push(token);
+        continue;
+      }
     }
+    unrecognized.push(token);
   }
-  return null;
+
+  // Two DIFFERENT org tokens name two audiences and cannot be reconciled, so the value
+  // fails closed to `platform` rather than silently picking one tenant over another.
+  const conflictingOrgs = orgIds.size > 1;
+  let scope = null;
+  if (conflictingOrgs) {
+    scope = 'platform';
+  } else if (recognized.length > 0) {
+    scope = recognized.reduce((most, next) => (visibilityRank(next) > visibilityRank(most) ? next : most));
+  }
+
+  // Distinct audiences, counting all org tokens for the same org as one audience.
+  const distinct = new Set(recognized.map((entry) => (typeof entry === 'object' ? `org:${entry.org}` : entry)));
+
+  return {
+    scope,
+    recognized,
+    unrecognized,
+    nonCanonicalPrefixes,
+    conflictingOrgs,
+    multiple: distinct.size > 1
+  };
+}
+
+function parseVisibility(value) {
+  return analyzeVisibility(value).scope;
 }
 
 function pathScope(node) {
@@ -1048,11 +1176,28 @@ function normalizeGrants(grants) {
   const input = grants && typeof grants === 'object' ? grants : {};
   return {
     isPlatformAdmin: input.isPlatformAdmin === true,
-    orgs: Array.isArray(input.orgs) ? input.orgs.map((org) => String(org)).filter(Boolean) : []
+    orgs: Array.isArray(input.orgs) ? input.orgs.map((org) => String(org)).filter(Boolean) : [],
+    // An explicit "authentication is switched off" posture, set only by openGrants().
+    // It is deliberately NOT the same thing as platform-admin identity; see openGrants.
+    open: input.open === true
   };
 }
 
 /**
+ * THE SPLIT. `canView` gates a FETCH; `isListed` gates an ENUMERATION.
+ *
+ * `unlisted` is the first value whose two answers differ: it is reachable by anyone
+ * holding the address and it is never enumerated. Getting the direction wrong is a bug in
+ * either direction, and both are silent:
+ *
+ *   canView used on an enumeration surface  -> unlisted pages published into llms.txt,
+ *                                              the sidebar, the search index, a sitemap
+ *   isListed used on the gate               -> 403 to the legitimate bearer, whose only
+ *                                              credential is the address they already hold
+ *
+ * If you are about to call one of these, the question to ask is not "who is this viewer"
+ * but "am I answering a fetch or building a list".
+ *
  * Grants are already the flattened reachability projection: direct memberships plus the
  * downward-admin cascade, resolved by the identity provider. ocp-core never expands an
  * org id, which is exactly how P11's "non-admin roles never cascade" is preserved.
@@ -1060,11 +1205,35 @@ function normalizeGrants(grants) {
 function canView(grants, scope) {
   const g = normalizeGrants(grants);
   if (scope === 'public') return true;
+  // Authorization for the bearer tier: possession of the address IS the credential, so
+  // every viewer is authorized. Discoverability is the other question; see isListed.
+  if (scope === 'unlisted') return true;
+  // Open posture reaches everything EXCEPT platform. An open wiki has no staff, so
+  // platform-scoped material (which includes `_users/**` membership declarations, the
+  // files that decide authorization) must not become reachable merely because
+  // authentication is switched off.
+  if (g.open) return scope !== 'platform';
   if (g.isPlatformAdmin) return true;
   if (scope === 'platform') return false;
   if (scope === 'internal') return g.orgs.length > 0;
   if (scope && typeof scope === 'object' && typeof scope.org === 'string') return g.orgs.includes(scope.org);
   return false;
+}
+
+/**
+ * Discoverability. Everything `canView` allows, minus the bearer tier.
+ *
+ * `isListed` EXEMPTS NOBODY, platform admins included, and that is deliberate. The axis
+ * that matters is artifact durability rather than viewer class: an unlisted page in a
+ * staff member's live sidebar is harmless, but the same page in an `llms.txt` response is
+ * a durable artifact that gets cached, scraped, and re-served. A surface that genuinely
+ * needs unlisted pages in a staff navigation tree should take an explicit option at the
+ * one call site that needs it, so the decision is auditable and greppable, never
+ * acquirable by accident through a grants object.
+ */
+function isListed(grants, scope) {
+  if (scope === 'unlisted') return false;
+  return canView(grants, scope);
 }
 
 function lookupScope(policy, route) {
@@ -1091,8 +1260,10 @@ function filterTree(tree, grants) {
   const nodes = [];
   const byRoute = {};
 
+  // Every predicate call in this function is an ENUMERATION, so all three are isListed
+  // rather than canView. A tree, a policy map, and a discovered list are all lists.
   function visit(node) {
-    if (!canView(g, lookupScope(policy, node.route))) return null;
+    if (!isListed(g, lookupScope(policy, node.route))) return null;
     const copy = Object.assign({}, node, { children: [] });
     nodes.push(copy);
     byRoute[copy.route] = copy;
@@ -1116,10 +1287,12 @@ function filterTree(tree, grants) {
     if (Object.prototype.hasOwnProperty.call(policy, route)) scopedPolicy[route] = policy[route];
   }
 
-  // `discovered` records unparseable files by path, so it is scoped the same way.
+  // `discovered` records unparseable files by path, so it is scoped the same way. This
+  // one matters more than it looks: DISCOVERED.md entries are keyed by path, so an
+  // unlisted page that failed to parse would otherwise name itself in a published report.
   const scopedDiscovered = (source.discovered || []).filter((entry) => {
     const route = String(entry.route || entry.path || '').replace(/\.md$/, '');
-    return canView(g, lookupScope(policy, route));
+    return isListed(g, lookupScope(policy, route));
   });
 
   return {
@@ -1183,14 +1356,27 @@ function scopedCorpus(context, grants, options) {
  * ------------------------------------------------------------------ */
 
 /**
- * OcpTree -> a Fumadocs-shaped PageTree. This is the only Fumadocs coupling ocp-core
- * has: a documented output shape. Nothing is imported from Fumadocs.
+ * Scoped OcpTree -> a Fumadocs-shaped PageTree. This is the only Fumadocs coupling
+ * ocp-core has: a documented output shape. Nothing is imported from Fumadocs.
+ *
+ * It REFUSES an unfiltered tree. A page tree is an enumeration, and a projection function
+ * that will happily enumerate an unfiltered tree is a disclosure primitive wearing a
+ * rendering function's name. `llmsText` has always had this guard; `project` did not, and
+ * scoping was left to caller convention, which is not a chokepoint. Detection is
+ * structural: `filterTree` attaches the normalized `grants` it filtered against, so its
+ * presence is the proof that filtering happened.
  */
 function project(tree, options) {
   const opts = options || {};
   const baseUrl = opts.baseUrl === undefined ? DEFAULT_BASE_URL : opts.baseUrl;
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
-  if (!source || !source.root) throw new TypeError('project expects an OcpTree (or { tree })');
+  if (!source || typeof source !== 'object') throw new TypeError('project expects an OcpTree (or { tree })');
+  if (!source.grants) {
+    throw new TypeError(
+      'project expects a SCOPED tree: pass filterTree(tree, grants) or scopedCorpus(tree, grants).tree, never a raw walk() result'
+    );
+  }
+  if (!source.root) throw new TypeError('project expects an OcpTree (or { tree })');
 
   function toChild(node) {
     if (node.kind === 'artifact') {
@@ -1220,11 +1406,13 @@ function llmsText(corpus) {
     throw new TypeError('llmsText expects the result of scopedCorpus(tree, grants)');
   }
   const scope = corpus.scope || { isPlatformAdmin: false, orgs: [] };
-  const scopeLabel = scope.isPlatformAdmin
-    ? 'platform-admin'
-    : scope.orgs.length > 0
-      ? `orgs: ${scope.orgs.join(', ')}`
-      : 'public only';
+  const scopeLabel = scope.open
+    ? 'open (unauthenticated)'
+    : scope.isPlatformAdmin
+      ? 'platform-admin'
+      : scope.orgs.length > 0
+        ? `orgs: ${scope.orgs.join(', ')}`
+        : 'public only';
   const title = corpus.tree && corpus.tree.root ? corpus.tree.root.displayName : 'OCP substrate';
   const lines = [`# ${title}`, ''];
   lines.push(
@@ -1254,6 +1442,42 @@ function conformance(tree) {
   }
 
   for (const node of source.nodes) {
+    // `visibility` diagnostics. Before these existed, a misspelled token parsed to nothing
+    // and the route fell through to path-derived scope with no signal at all, which meant
+    // a typo silently widened or narrowed who could read a page.
+    const vis = analyzeVisibility(node.visibility);
+    for (const token of vis.unrecognized) {
+      add(
+        node,
+        'visibility-unrecognized-token',
+        'error',
+        `visibility token "${token}" is not recognized (expected one of ${VISIBILITY_BARE_TOKENS.join(', ')}, or <${VISIBILITY_ORG_PREFIXES.join('|')}>:<id>); it contributes nothing and this route falls through to path-derived scope`
+      );
+    }
+    if (vis.conflictingOrgs) {
+      add(
+        node,
+        'visibility-multiple-audiences',
+        'error',
+        'visibility declares more than one org audience; the field names one audience, so this resolves fail-closed to platform'
+      );
+    } else if (vis.multiple) {
+      add(
+        node,
+        'visibility-multiple-audiences',
+        'error',
+        `visibility declares more than one audience; the field names one, so this resolves to the most restrictive (${JSON.stringify(vis.scope)})`
+      );
+    }
+    for (const token of vis.nonCanonicalPrefixes) {
+      add(
+        node,
+        'visibility-non-canonical-prefix',
+        'warning',
+        `visibility token "${token}" uses an accepted alias prefix; "${VISIBILITY_CANONICAL_ORG_PREFIX}:" is the canonical emission spelling and all four resolve identically`
+      );
+    }
+
     for (const problem of node.problems) {
       problems.push({
         path: node.entryPoint || node.path,
@@ -1306,14 +1530,24 @@ function conformance(tree) {
  * ------------------------------------------------------------------ */
 
 /**
- * Everything-public adapter. It grants full reach, so it is correct only for a
- * single-tenant or genuinely public substrate. Never deploy it multi-tenant.
+ * Everything-public adapter, for a single-tenant or genuinely public substrate. Never
+ * deploy it multi-tenant.
+ *
+ * It declares an explicit OPEN POSTURE rather than claiming platform-admin identity. The
+ * distinction is not cosmetic. Returning `isPlatformAdmin: true` meant the bundled "there
+ * is no auth here" adapter achieved its result by impersonating staff, so any rule
+ * written in terms of staff identity silently applied to every anonymous visitor. Paired
+ * with a platform-admin exemption it would publish exactly what `unlisted` exists to
+ * withhold, reachable by using the default.
+ *
+ * Open reaches everything except `platform`, and enumerates everything except `platform`
+ * and `unlisted`.
  */
 function openGrants() {
   return {
     kind: 'open',
     resolve() {
-      return { isPlatformAdmin: true, orgs: [] };
+      return { isPlatformAdmin: false, orgs: [], open: true };
     }
   };
 }
@@ -1383,7 +1617,9 @@ module.exports = {
   discoveredReport,
   haltStatus,
   derivePolicy,
+  parseVisibility,
   canView,
+  isListed,
   lookupScope,
   filterTree,
   scopedCorpus,

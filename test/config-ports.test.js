@@ -26,10 +26,12 @@ test('the public export surface is stable', () => {
     'envGrants',
     'filterTree',
     'haltStatus',
+    'isListed',
     'llmsText',
     'lookupScope',
     'openGrants',
     'parseArtifact',
+    'parseVisibility',
     'project',
     'scopedCorpus',
     'walk'
@@ -143,11 +145,16 @@ test('walk stamps the substrate SHA onto the tree', () => {
   }
 });
 
-test('openGrants resolves to full reach', () => {
+test('openGrants resolves to an explicit open posture, not a platform-admin identity', () => {
   const port = openGrants();
   assert.equal(port.kind, 'open');
-  assert.deepEqual(port.resolve({}), { isPlatformAdmin: true, orgs: [] });
+  // 0.5.0: the adapter declares `open` rather than claiming staff identity. It reaches
+  // every scope except `platform`, because an open wiki has no staff and `_users/**`
+  // membership declarations must not become readable merely because auth is switched off.
+  assert.deepEqual(port.resolve({}), { isPlatformAdmin: false, orgs: [], open: true });
   assert.equal(canView(port.resolve({}), { org: 'anything' }), true);
+  assert.equal(canView(port.resolve({}), 'internal'), true);
+  assert.equal(canView(port.resolve({}), 'platform'), false);
 });
 
 test('envGrants maps a platform-admin token and an org allowlist, and otherwise fails closed', () => {

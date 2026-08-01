@@ -89,10 +89,15 @@ test('each page carries the scope it was admitted under', () => {
 
 test('the corpus reports the grants it was built for', () => {
   withTree((tree) => {
-    assert.deepEqual(scopedCorpus(tree, ALPHA).scope, { isPlatformAdmin: false, orgs: ['alpha'] });
+    assert.deepEqual(scopedCorpus(tree, ALPHA).scope, {
+      isPlatformAdmin: false,
+      orgs: ['alpha'],
+      open: false
+    });
     assert.deepEqual(scopedCorpus(tree, { orgs: ['x'], isPlatformAdmin: 'yes' }).scope, {
       isPlatformAdmin: false,
-      orgs: ['x']
+      orgs: ['x'],
+      open: false
     });
   });
 });

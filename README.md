@@ -309,7 +309,7 @@ artifact_type: note
 role: capture
 status: active
 trust_tier: 2                     # unvetted; captured from an external source
-visibility: [account:acme-co]     # scope of who/what may retrieve this
+visibility: [org:acme-co]         # who this is for; the credential follows
 metadata:
   source: inbound-email
   agent_roles_read: [triage]
@@ -391,7 +391,7 @@ const artifact = parseArtifact(
     'role: capture',
     'display_name: Inbound Capture',
     'trust_tier: 2                     # unvetted',
-    'visibility: [account:acme-co]',
+    'visibility: [org:acme-co]',
     'tags: [inbound, triage]',
     '---',
     '',
@@ -403,7 +403,7 @@ const artifact = parseArtifact(
 console.log(artifact.slug);        // orgs/acme/notes/capture
 console.log(artifact.displayName); // Inbound Capture
 console.log(artifact.trustTier);   // 2
-console.log(artifact.visibility);  // [ 'account:acme-co' ]
+console.log(artifact.visibility);  // [ 'org:acme-co' ]
 console.log(artifact.tags);        // [ 'inbound', 'triage' ]
 console.log(artifact.links);       // [ { target: 'handbook', display: 'the handbook', raw: '[[handbook|the handbook]]' } ]
 console.log(artifact.problems);    // []
@@ -559,16 +559,88 @@ Nothing is `public` unless something declares it. To publish a substrate, declar
 > mechanism, which is the F-038 caveat below applied to the one case where you are most likely
 > to need it.
 
-`visibility` accepts `public`, `internal`, `platform`, and `<prefix>:<id>` where the prefix is
-one of `org`, `account`, `tenant`, or `agency` — all four resolve to `{ org: id }`. Canon's
-documented example uses `account:`, while the implemented union is flat `{ org }`; accepting
-both is deliberate. Only the first recognized entry is honoured, because `RequiredScope` is one
-value and canon has not ruled on set semantics.
+#### The `visibility` vocabulary
 
-> **The `visibility:` half is proposed and unexercised.** Grounding F-038: **zero** of the 322
-> files in the reference substrate carry `visibility:` in frontmatter — the one occurrence in
-> that tree is a documentation example. Path-derived ownership is the half with production data
-> behind it. Treat the cascade as a design you are testing, not a mechanism that has run.
+Five values, and the set is closed:
+
+```
+visibility: public | unlisted | internal | platform | org:<slug>
+```
+
+**The design rule, which is the whole of it: the field names the AUDIENCE, and the credential
+mechanism is derived from it rather than chosen separately.** Everyone implies no credential;
+anyone holding the address implies a bearer credential; a named scope implies a resolved
+principal. There is exactly one free variable, and the field names it. An earlier draft proposed
+an `accessModel` axis enumerating the mechanism instead, which names the derived term rather
+than the free one; a consumer given the mechanism has to reverse-engineer the audience, while a
+consumer given the audience derives the mechanism deterministically.
+
+| Value | Audience | Credential |
+| --- | --- | --- |
+| `public` | everyone | none |
+| `unlisted` | anyone holding the address | the address itself |
+| `internal` | any member of any org | a resolved principal |
+| `org:<slug>` | members of that org | a resolved principal |
+| `platform` | staff only | a resolved principal |
+
+**`org:` is the canonical emission spelling.** `account:`, `tenant:`, and `agency:` are
+**accepted aliases** and all four resolve to `{ org: id }`. The parser is deliberately not
+narrowed: narrowing an accepted input set is a breaking change with nothing on the other side of
+it. `conformance()` warns on an alias so you can migrate at your own pace.
+
+> **Reader trap, because everyone hits it once.** `account`, `tenant`, and `agency` are *also*
+> OCP **altitude** terms (see `ALTITUDES`). Altitude and visibility-audience are different axes
+> that happen to share three words. An altitude is a position in the org hierarchy, it is
+> descriptive, and nothing validates against it because no artifact declares one. A
+> visibility-audience token is authored per artifact, is parsed, and decides policy.
+
+**A page has one audience, so more than one recognized token resolves to the most restrictive,
+independent of order.** The ladder, least to most restrictive, is `public`, `unlisted`,
+`internal`, `org:<slug>`, `platform`. Two *different* org tokens name two audiences, cannot be
+reconciled, and fail closed to `platform`. Every one of these is also a `conformance()` error, so
+the resolution is a safety net rather than a feature to use.
+
+#### `unlisted` and the address-entropy obligation
+
+`unlisted` is the one value whose security rests **entirely on the address**. `public` is meant
+to be found, and the identity-checked values are protected by the identity check.
+
+> **An unlisted page at a guessable address is a lie.**
+
+That obligation binds **whatever mints the address**, and it does not bind `ocp-core`. This
+library mints no addresses, so it cannot enforce a property of addresses it never creates. If you
+serve `unlisted` content, the entropy is yours to supply, and nothing here will tell you that you
+forgot.
+
+#### `canView` gates a fetch; `isListed` gates an enumeration
+
+`unlisted` is the first value whose **authorization** answer and **discoverability** answer
+differ, and one predicate cannot answer both:
+
+```js
+canView(grants, 'unlisted');   // true:  possession of the address IS the credential
+isListed(grants, 'unlisted');  // false: for every viewer, platform admins included
+```
+
+For every other value the two agree. Use `canView` on the page-fetch path and the proxy gate, and
+nowhere else. Use `isListed` for anything that builds a list: the page tree, search indexes,
+`llms.txt`, sitemaps, OG generation. `filterTree` and everything derived from it already uses
+`isListed`, so `scopedCorpus` and `llmsText` are correct by construction.
+
+Both directions of getting it wrong are silent. `canView` on an enumeration surface publishes
+unlisted pages into `llms.txt`. `isListed` on the gate returns 403 to the legitimate bearer, whose
+only credential is the address they already hold.
+
+`isListed` **exempts nobody**, platform admins included. The axis that matters is artifact
+durability rather than viewer class: an unlisted page in a staff member's live sidebar is
+harmless, but the same page in an `llms.txt` response is a durable artifact that gets cached,
+scraped, and re-served.
+
+> **The `visibility:` cascade is proposed and unexercised.** Grounding F-038: **zero** files in
+> the reference substrate carry `visibility:` in frontmatter; the one occurrence in that tree is
+> a documentation example. Path-derived ownership is the half with production data behind it.
+> Treat the cascade as a design you are testing, not a mechanism that has run. The *values* are
+> ratified canon; the *cascade* is the part still on trial.
 
 **One ruling beyond canon, stated so you can disagree with it:** an inherited `visibility`
 cascade **resets at a nested org boundary**. Without that, a single `visibility: [public]` on the
@@ -601,11 +673,22 @@ any deployment with orgs nested more than one level deep.**
 | `'platform'` | ❌ | ❌ | ✅ |
 | `{ org: 'a' }` | ❌ | ✅ | ✅ |
 | `{ org: 'b' }` | ❌ | ❌ | ✅ |
+| `'unlisted'` | ✅ | ✅ | ✅ |
+
+`'unlisted'` is ✅ for every column on purpose: possession of the address is the credential. The
+column that answers "does it show up in a list" is `isListed`, below, where `'unlisted'` is ❌ for
+every viewer.
 
 Admin authority cascades downward (P11) — but **that cascade happens in your identity provider,
 not here**. `grants.orgs` is already the flattened reachability projection (direct memberships
 plus the downward-admin cascade). `ocp-core` never expands an org id; it tests membership
 exactly. That is precisely how "non-admin roles never cascade" stays true.
+
+#### `isListed(grants, scope) → boolean`
+
+Everything `canView` allows, minus `'unlisted'`, which is `false` for every viewer including a
+platform admin. Use it for anything that builds a list; use `canView` for a fetch. `filterTree`
+already uses it, so `scopedCorpus` and `llmsText` inherit it.
 
 #### `lookupScope(policy, route) → RequiredScope`
 
@@ -679,8 +762,13 @@ a documented output shape. Nothing is imported from Fumadocs, UI or otherwise.
 ```
 
 A folder gets an `index` page only when its directory has a `README.md`. `options.baseUrl`
-defaults to `/docs`. Pass it `corpus.tree` rather than the raw tree and the projection is scoped
-for free — the quickstart does exactly that.
+defaults to `/docs`.
+
+**It requires a scoped tree and throws on a raw one.** Pass `filterTree(tree, grants)` or
+`corpus.tree`, never the `walk()` result directly. A page tree is an enumeration, and a
+projection function that will happily enumerate an unfiltered tree is a disclosure primitive
+wearing a rendering function's name. Detection is structural: `filterTree` attaches the grants it
+filtered against, and their presence is the proof that filtering happened.
 
 ### `llmsText(corpus) → string`
 
@@ -728,7 +816,7 @@ A `GrantsPort` is one method: `resolve(request) → Grants`. Two are bundled.
 const { openGrants, envGrants } = require('ocp-core');
 
 console.log(openGrants().resolve({}));
-// { isPlatformAdmin: true, orgs: [] }
+// { isPlatformAdmin: false, orgs: [], open: true }
 
 const port = envGrants({
   OCP_PLATFORM_ADMIN_TOKEN: 'staff-token',
@@ -743,8 +831,14 @@ console.log(port.resolve({ headers: { authorization: 'Bearer nope' } }));
 // { isPlatformAdmin: false, orgs: [] }
 ```
 
-`openGrants()` grants **full reach**, which makes it correct for a single-tenant or genuinely
-public substrate and wrong for anything else. Never deploy it multi-tenant.
+`openGrants()` declares an explicit **open posture** rather than claiming staff identity. It
+reaches every scope except `platform`, and enumerates every scope except `platform` and
+`unlisted`. That makes it correct for a single-tenant or genuinely public substrate and wrong for
+anything else. Never deploy it multi-tenant.
+
+The `platform` exclusion is deliberate: an open wiki has no staff, so `platform`-scoped material
+(which includes `_users/**` membership declarations, the files that decide authorization) should
+not become readable merely because authentication is switched off.
 
 `envGrants(env)` reads a static token allowlist from environment variables (defaulting to
 `process.env`) and fails closed on anything unrecognized. It accepts a bearer token, an

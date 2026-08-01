@@ -2,8 +2,12 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { walk, createFileSystemSubstrate, project, scopedCorpus, llmsText } = require('../index.js');
+const { walk, createFileSystemSubstrate, project, filterTree, scopedCorpus, llmsText } = require('../index.js');
 const { baseFixture, writeSubstrate, removeSubstrate } = require('./fixture.js');
+
+// 0.5.0: `project` refuses an unfiltered tree, so these shape tests scope first. A staff
+// grant is used because these assert the projection shape rather than the filtering.
+const STAFF = { isPlatformAdmin: true, orgs: [] };
 
 function withTree(fn) {
   const dir = writeSubstrate(baseFixture());
@@ -14,12 +18,16 @@ function withTree(fn) {
   }
 }
 
+function withScopedTree(fn) {
+  return withTree((tree) => fn(filterTree(tree, STAFF), tree));
+}
+
 function findFolder(children, name) {
   return children.find((child) => child.type === 'folder' && child.name === name);
 }
 
 test('project produces the documented Fumadocs PageTree shape', () => {
-  withTree((tree) => {
+  withScopedTree((tree) => {
     const pageTree = project(tree);
 
     assert.equal(pageTree.name, 'Acme Platform');
@@ -45,7 +53,7 @@ test('project produces the documented Fumadocs PageTree shape', () => {
 });
 
 test('project honours a custom baseUrl', () => {
-  withTree((tree) => {
+  withScopedTree((tree) => {
     const pageTree = project(tree, { baseUrl: '/wiki' });
     assert.equal(pageTree.children[0].url, '/wiki');
     const notes = findFolder(pageTree.children, 'Platform Notes');
@@ -59,7 +67,7 @@ test('a directory without a README renders as a folder with no index page', () =
   const dir = writeSubstrate(files);
   try {
     const tree = walk(createFileSystemSubstrate(dir), { substrateRoot: dir });
-    const notes = findFolder(project(tree).children, 'Notes');
+    const notes = findFolder(project(filterTree(tree, STAFF)).children, 'Notes');
     assert.ok(notes);
     assert.equal(notes.index, undefined);
     assert.equal(notes.children.length, 1);
@@ -71,6 +79,13 @@ test('a directory without a README renders as a folder with no index page', () =
 test('project rejects anything that is not a tree', () => {
   assert.throws(() => project(null), TypeError);
   assert.throws(() => project({ nodes: [] }), TypeError);
+});
+
+test('project rejects an unfiltered tree, naming the fix', () => {
+  withTree((tree) => {
+    assert.throws(() => project(tree), TypeError);
+    assert.throws(() => project(tree), /filterTree|scopedCorpus/);
+  });
 });
 
 test('llmsText lists exactly the corpus pages, in tree order', () => {

@@ -1,17 +1,22 @@
 {
   "name": "ocp-core",
-  "version": "0.5.0",
-  "description": "The OCP (Organizational Context Protocol) projection library — walk a git-native markdown substrate, derive access policy, produce scoped projections, and validate conformance (npx ocp-core validate).",
+  "version": "0.5.1",
+  "description": "The OCP (Organizational Context Protocol) projection library \u2014 walk a git-native markdown substrate, derive access policy, produce scoped projections, and validate conformance (npx ocp-core validate).",
   "main": "./index.js",
   "bin": {
     "ocp-core": "cli.js"
   },
   "exports": {
-    ".": "./index.js",
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./index.js"
+    },
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "build:types": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build:types && npm test"
   },
   "license": "MIT",
   "author": "Max Forbang",
@@ -35,12 +40,18 @@
   ],
   "files": [
     "index.js",
-    "cli.js"
+    "cli.js",
+    "types/"
   ],
   "engines": {
     "node": ">=20"
   },
   "publishConfig": {
     "access": "public"
-  }
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  },
+  "types": "./types/index.d.ts"
 }

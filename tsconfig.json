@@ -1,0 +1,22 @@
+{
+  "$comment": "Declaration emit only. This package is plain CommonJS JavaScript with a Node 20 floor and stays that way; TypeScript is a build-time tool that projects the JSDoc in index.js into .d.ts, never a source language here. checkJs is on so that JSDoc which disagrees with the code is a build failure rather than a published lie.",
+  "compilerOptions": {
+    "target": "es2022",
+    "lib": ["es2022"],
+    "module": "commonjs",
+    "types": ["node"],
+
+    "allowJs": true,
+    "checkJs": true,
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "outDir": "types",
+
+    "strict": true,
+    "useUnknownInCatchVariables": false,
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["index.js"]
+}

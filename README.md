@@ -88,8 +88,41 @@ two-person shop and for a platform serving hundreds of accounts.
 npm install ocp-core
 ```
 
-Node.js 20 or newer. **Zero runtime dependencies, zero devDependencies.** CommonJS
-(`require`); it also works from ESM via the default import.
+Node.js 20 or newer. **Zero runtime dependencies.** CommonJS (`require`); it also works
+from ESM via the default import. TypeScript is a devDependency and is used only to emit
+declarations at release time; nothing it produces is required at runtime.
+
+### TypeScript
+
+Declarations ship with the package. There is nothing to install and no `@types/ocp-core`
+to look for.
+
+```ts
+import { canView, isListed, filterTree, project } from 'ocp-core';
+import type { Grants, RequiredScope, VisibilityToken, ScopedCorpus } from 'ocp-core';
+```
+
+**They are generated from the source, never handwritten.** `index.js` carries the JSDoc,
+`npm run build:types` emits `types/index.d.ts` with `--checkJs`, and `prepublishOnly` runs
+it, so a publish cannot ship declarations older than the code they describe. A handwritten
+`.d.ts` would lag the first time someone edited the source in a hurry, and TypeScript would
+keep accepting stale consumer code while it did.
+
+Two things the types buy you that the runtime alone does not:
+
+```ts
+const v: VisibilityToken = 'unlited';   // compile error, suggests 'unlisted'
+project(walk(substrate, config));       // compile error: pass a scoped tree
+```
+
+The second is the one worth upgrading for. `project` refuses an unfiltered tree at runtime,
+but a runtime throw is found by whoever runs the code; a type error is found by whoever
+writes it. The parameter type is the filtered shape, so forgetting to scope is caught at the
+call site.
+
+**If you have been carrying an ambient declaration for this package, delete it.** A
+hand-declared surface in each consumer is the same fork risk as a copied enum, arriving
+through the type system instead of the value set.
 
 ## Validate a substrate
 

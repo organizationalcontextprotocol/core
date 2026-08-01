@@ -42,6 +42,288 @@ const DEFAULT_BASE_URL = '/docs';
 const WIKILINK_PATTERN = /\[\[([^\][|]+)(?:\|([^\][]*))?\]\]/g;
 
 /* ------------------------------------------------------------------ *
+ * Types
+ *
+ * These are the shapes that cross the package boundary. They are declared as
+ * JSDoc rather than in a hand-written .d.ts on purpose: the published
+ * declarations are emitted from this file by `npm run build:types`, so they
+ * cannot drift from the code the way a parallel artifact would.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A token as an author writes it in `visibility:` frontmatter.
+ *
+ * The prefixed forms all resolve to the same org scope. `org:` is the canonical
+ * emission spelling; `account:`, `tenant:` and `agency:` are accepted aliases
+ * retained under ADR-041's additive-only plus tolerant-reader policy.
+ *
+ * Note that `account`, `tenant` and `agency` are also OCP ALTITUDE terms. The two
+ * axes are unrelated and happen to share three words.
+ *
+ * @typedef {'public' | 'unlisted' | 'internal' | 'platform'
+ *   | `org:${string}` | `account:${string}` | `tenant:${string}` | `agency:${string}`} VisibilityToken
+ */
+
+/**
+ * The resolved audience a route requires, after parsing and cascade.
+ *
+ * This is the OUTPUT vocabulary and it is not the same as {@link VisibilityToken}:
+ * the four prefixed spellings have collapsed into one `{ org }` shape by the time
+ * a scope exists.
+ *
+ * @typedef {'public' | 'unlisted' | 'internal' | 'platform' | { org: string }} RequiredScope
+ */
+
+/**
+ * A viewer's reach, already flattened by the identity provider.
+ *
+ * `orgs` is the flattened reachability projection, direct memberships plus the
+ * downward-admin cascade. `ocp-core` never expands an org id.
+ *
+ * @typedef {object} Grants
+ * @property {boolean} [isPlatformAdmin] Staff reach. Absent means false.
+ * @property {string[]} [orgs] Org slugs this viewer reaches. Absent means none.
+ * @property {boolean} [open] Explicit "authentication is switched off" posture, set
+ *   only by {@link openGrants}. **Absent means not open.** It is deliberately not the
+ *   same thing as platform-admin identity: open reaches every scope except `platform`,
+ *   and enumerates every scope except `platform` and `unlisted`.
+ */
+
+/** @typedef {{ isPlatformAdmin: boolean, orgs: string[], open: boolean }} NormalizedGrants */
+
+/** @typedef {{ name: string, type: 'file' | 'dir' }} SubstrateEntry */
+
+/**
+ * The read side of the substrate. One interface, one bundled implementation.
+ *
+ * @typedef {object} SubstratePort
+ * @property {(relPath: string) => string} read Read a file as UTF-8. May throw; the walk is fail-soft.
+ * @property {(relDir: string) => SubstrateEntry[]} list List a directory. May throw; the walk is fail-soft.
+ * @property {() => string | null} [sha] Optional substrate version stamp.
+ * @property {(relDir: string) => string | null} [realPath] Optional; lets the walker detect a
+ *   symlinked directory resolving to one it has already visited.
+ * @property {string} [kind]
+ * @property {string} [root]
+ */
+
+/**
+ * The identity seam. One method, so any session-issuing IdP wires in as a relying party.
+ *
+ * @typedef {object} GrantsPort
+ * @property {string} kind
+ * @property {(request?: unknown) => Grants} resolve
+ */
+
+/**
+ * @typedef {object} OcpConfig
+ * @property {string} substrateRoot
+ * @property {string[]} exclude
+ * @property {string | null} sourceBlobBase
+ * @property {Record<string, string>} displayOverrides
+ */
+
+/**
+ * @typedef {object} OcpConfigInput
+ * @property {string} [substrateRoot] Defaults to `'.'`.
+ * @property {string[]} [exclude] Defaults to the built-in exclude list.
+ * @property {string | null} [sourceBlobBase] Defaults to null.
+ * @property {Record<string, string>} [displayOverrides] Route to display name.
+ */
+
+/** @typedef {{ code: string, severity: 'error' | 'warning', message: string }} ArtifactProblem */
+
+/** @typedef {{ target: string, display: string | null, raw: string }} WikiLink */
+
+/**
+ * @typedef {object} Artifact
+ * @property {string} path
+ * @property {string} slug
+ * @property {string | null} artifactType
+ * @property {string | null} role
+ * @property {string} displayName
+ * @property {string | null} status
+ * @property {string | null} tenant
+ * @property {string[]} tags
+ * @property {VisibilityToken | VisibilityToken[] | string | string[] | null} visibility Raw frontmatter
+ *   value, unparsed. Run it through {@link parseVisibility} to get a {@link RequiredScope}.
+ * @property {number | null} trustTier
+ * @property {Record<string, unknown>} frontmatter
+ * @property {string} body
+ * @property {WikiLink[]} links
+ * @property {ArtifactProblem[]} problems
+ */
+
+/** @typedef {'org' | 'user' | 'kernel' | 'substrate-dir' | 'content-dir' | 'artifact'} OcpNodeKind */
+
+/**
+ * @typedef {object} OcpNode
+ * @property {OcpNodeKind} kind
+ * @property {string} route
+ * @property {string} path
+ * @property {string} name
+ * @property {string} displayName
+ * @property {string | null} role
+ * @property {string | null} artifactType
+ * @property {string | null} status
+ * @property {string | null} tenant
+ * @property {string[]} tags
+ * @property {VisibilityToken | VisibilityToken[] | string | string[] | null} visibility
+ * @property {number | null} trustTier
+ * @property {Record<string, unknown>} frontmatter
+ * @property {string} body
+ * @property {WikiLink[]} links
+ * @property {string | null} entryPoint The README that stands in for a directory, else null.
+ * @property {string | null} orgId
+ * @property {string | null} parentOrgId
+ * @property {string | null} owningOrg
+ * @property {OcpNode[]} children
+ * @property {ArtifactProblem[]} problems
+ */
+
+/**
+ * A file or directory the walk could not read or parse. `kind` partitions the list:
+ * a directory that could not be enumerated read no file, so it belongs to neither
+ * side of the count-parity identity.
+ *
+ * @typedef {{ kind: 'file' | 'directory', path: string, reason: string, route?: string }} Discovered
+ */
+
+/** @typedef {{ filesSeen: number, directories: number, rendered: number }} WalkStats */
+
+/**
+ * The result of {@link walk}. **Unscoped**, so it must not be handed to a
+ * projection: see {@link FilteredTree}.
+ *
+ * @typedef {object} OcpTree
+ * @property {OcpNode} root
+ * @property {OcpNode[]} nodes
+ * @property {Record<string, OcpNode>} byRoute
+ * @property {Discovered[]} discovered
+ * @property {string | null} sha
+ * @property {OcpConfig} config
+ * @property {WalkStats} stats
+ * @property {Record<string, RequiredScope>} [policy]
+ * @property {undefined} [grants] Never present on a raw tree. This is what makes passing
+ *   one to {@link project} a compile error rather than only a runtime throw.
+ * @property {undefined} [tree] Never present. Declared so the accepted-input union below is
+ *   discriminated on the same property the runtime unwrap tests.
+ */
+
+/**
+ * The result of {@link filterTree}: a tree pruned to one viewer, carrying the grants
+ * it was filtered against. The presence of `grants` is the structural proof that
+ * filtering happened, and it is what {@link project} checks.
+ *
+ * @typedef {object} FilteredTree
+ * @property {OcpNode | null} root Null when the viewer cannot see the root itself.
+ * @property {OcpNode[]} nodes
+ * @property {Record<string, OcpNode>} byRoute
+ * @property {Discovered[]} discovered
+ * @property {string | null} sha
+ * @property {OcpConfig} config
+ * @property {WalkStats} stats
+ * @property {Record<string, RequiredScope>} policy
+ * @property {NormalizedGrants} grants
+ * @property {undefined} [tree] Never present; see {@link OcpTree}.
+ */
+
+/**
+ * Several functions accept either a tree or a `{ tree }` wrapper, because a
+ * {@link ScopedCorpus} carries its tree under that key. The wrapper declares
+ * `root?: undefined` so the union is discriminated on the property the runtime
+ * unwrap actually tests.
+ *
+ * @typedef {{ tree: OcpTree | FilteredTree, root?: undefined, policy?: Record<string, RequiredScope> }} TreeWrapper
+ */
+
+/** @typedef {OcpTree | FilteredTree | TreeWrapper} TreeInput */
+
+/**
+ * What {@link project} accepts. Deliberately narrower than {@link TreeInput}: a raw
+ * {@link OcpTree} is not a member, which is what turns "you forgot to scope this"
+ * from a runtime throw into a compile error.
+ *
+ * @typedef {{ tree: FilteredTree, root?: undefined }} ScopedTreeWrapper
+ */
+
+/** @typedef {FilteredTree | ScopedTreeWrapper} ScopedTreeInput */
+
+/**
+ * @typedef {object} CorpusPage
+ * @property {string} route
+ * @property {string} url
+ * @property {string} path
+ * @property {string} displayName
+ * @property {string | null} artifactType
+ * @property {string | null} role
+ * @property {string[]} tags
+ * @property {RequiredScope} scope
+ * @property {string} text
+ */
+
+/**
+ * THE disclosure chokepoint's output. Every read surface derives from this.
+ *
+ * @typedef {object} ScopedCorpus
+ * @property {FilteredTree} tree
+ * @property {CorpusPage[]} pages
+ * @property {string} text
+ * @property {NormalizedGrants} scope
+ * @property {string | null} sha
+ */
+
+/** @typedef {{ type: 'page', name: string, url: string }} PageTreePage */
+
+/**
+ * @typedef {object} PageTreeFolder
+ * @property {'folder'} type
+ * @property {string} name
+ * @property {Array<PageTreePage | PageTreeFolder>} children
+ * @property {PageTreePage} [index]
+ */
+
+/** @typedef {{ name: string, children: Array<PageTreePage | PageTreeFolder> }} PageTree */
+
+/**
+ * @typedef {object} ConformanceProblem
+ * @property {string | null} path
+ * @property {string} route
+ * @property {string} code
+ * @property {'error' | 'warning'} severity
+ * @property {string} message
+ */
+
+/** @typedef {{ ok: boolean, problems: ConformanceProblem[] }} ConformanceResult */
+
+/**
+ * @typedef {object} HaltStatus
+ * @property {number} filesSeen
+ * @property {number} failed
+ * @property {number} directoryFailures
+ * @property {number} considered Denominator: files read plus directories that could not be listed.
+ * @property {number} rate
+ * @property {number} threshold
+ * @property {boolean} halt
+ */
+
+/** @typedef {{ baseUrl?: string | null }} ProjectOptions */
+
+/** @typedef {{ baseUrl?: string | null }} CorpusOptions */
+
+/**
+ * The full analysis of a raw `visibility` value. {@link parseVisibility} is its
+ * `scope` half; `conformance()` consumes the diagnostic half.
+ *
+ * @typedef {object} VisibilityAnalysis
+ * @property {RequiredScope | null} scope
+ * @property {RequiredScope[]} recognized
+ * @property {string[]} unrecognized
+ * @property {string[]} nonCanonicalPrefixes
+ * @property {boolean} conflictingOrgs
+ * @property {boolean} multiple
+ */
+
+/* ------------------------------------------------------------------ *
  * Shared text helpers
  * ------------------------------------------------------------------ */
 
@@ -85,6 +367,7 @@ function transformLineSegments(line, transform) {
 }
 
 function transformNonCodeSegments(body, transform) {
+  /** @type {string | null} */
   let fence = null;
   return body
     .split('\n')
@@ -253,6 +536,7 @@ function parseIndentedBlock(blockLines, skipped) {
 
 function parseListBlock(lines, base, skipped) {
   const items = [];
+  /** @type {Record<string, string> | null} */
   let current = null;
   let i = 0;
   while (i < lines.length) {
@@ -412,6 +696,7 @@ function toSlug(filePath) {
 }
 
 function firstHeading(body) {
+  /** @type {string | null} */
   let fence = null;
   for (const line of body.split('\n')) {
     const marker = fenceMarkerOf(line);
@@ -448,6 +733,7 @@ function extractLinks(body) {
 }
 
 function plainText(body) {
+  /** @type {string | null} */
   let fence = null;
   const kept = [];
   for (const line of body.split('\n')) {
@@ -486,6 +772,14 @@ function plainText(body) {
  * humanized final path segment. Grounding F-008: OCP names the human-readable key
  * `display_name`, and a schema that requires `title` silently drops most of a real
  * substrate (271 of 322 files). Accepting `title` is Postel's law, not the contract.
+ */
+/**
+ * Parse one markdown artifact. Never throws on bad frontmatter: problems are
+ * collected onto the returned artifact so the walk stays fail-soft.
+ *
+ * @param {string} source
+ * @param {{ path?: string }} [opts]
+ * @returns {Artifact}
  */
 function parseArtifact(source, opts) {
   const options = opts || {};
@@ -550,7 +844,7 @@ function parseArtifact(source, opts) {
   }
 
   const fallbackSegment =
-    slug === '' ? String(filePath).split('/').pop().replace(/\.md$/i, '') || 'README' : slug.split('/').pop();
+    slug === '' ? /** @type {string} */ (String(filePath).split('/').pop()).replace(/\.md$/i, '') || 'README' : slug.split('/').pop();
   const displayName =
     stringOrNull(frontmatter.display_name) ||
     stringOrNull(frontmatter.title) ||
@@ -581,6 +875,13 @@ function parseArtifact(source, opts) {
 
 const CONFIG_KEYS = ['substrateRoot', 'exclude', 'sourceBlobBase', 'displayOverrides'];
 
+/**
+ * Validate and normalize an OCP config. Throws on an unknown key, which is how a
+ * typo in a config file becomes an error rather than a silently ignored setting.
+ *
+ * @param {OcpConfigInput} [config]
+ * @returns {OcpConfig}
+ */
 function defineConfig(config) {
   const input = config === undefined ? {} : config;
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -691,6 +992,12 @@ function readGitSha(rootDir) {
   return null;
 }
 
+/**
+ * The one bundled {@link SubstratePort}: read a substrate from local disk.
+ *
+ * @param {string} rootDir
+ * @returns {SubstratePort}
+ */
 function createFileSystemSubstrate(rootDir) {
   if (typeof rootDir !== 'string' || rootDir === '') {
     throw new TypeError('createFileSystemSubstrate expects a root directory path');
@@ -740,6 +1047,12 @@ function createFileSystemSubstrate(rootDir) {
  * walk — README-as-index, frontmatter classification, fail-soft
  * ------------------------------------------------------------------ */
 
+/**
+ * @param {string} name
+ * @param {string | null} role
+ * @param {boolean} isRoot
+ * @returns {Exclude<OcpNodeKind, 'artifact'>}
+ */
 function classifyDirectory(name, role, isRoot) {
   // The repository root IS an organization: the graph root, parent_org_id null.
   if (isRoot) return 'org';
@@ -751,6 +1064,20 @@ function classifyDirectory(name, role, isRoot) {
   return 'content-dir';
 }
 
+/**
+ * Walk a substrate into an {@link OcpTree}.
+ *
+ * Fail-soft: a file that cannot be read or parsed lands in `discovered` and the walk
+ * continues. It never aborts and it is never silently dropped, which the count-parity
+ * assertion at the end of the walk enforces structurally.
+ *
+ * The result is **unscoped**. Pass it through {@link filterTree} or
+ * {@link scopedCorpus} before any surface that enumerates.
+ *
+ * @param {SubstratePort} substrate
+ * @param {OcpConfigInput} [config]
+ * @returns {OcpTree}
+ */
 function walk(substrate, config) {
   if (!substrate || typeof substrate.read !== 'function' || typeof substrate.list !== 'function') {
     throw new TypeError('walk expects a SubstratePort with read(path) and list(dir)');
@@ -758,7 +1085,9 @@ function walk(substrate, config) {
   const cfg = defineConfig(config);
   const excluded = new Set(cfg.exclude);
   const discovered = [];
+  /** @type {OcpNode[]} */
   const nodes = [];
+  /** @type {Record<string, OcpNode>} */
   const byRoute = {};
   let filesSeen = 0;
 
@@ -864,6 +1193,7 @@ function walk(substrate, config) {
       orgId = inherited.orgId;
     }
 
+    /** @type {OcpNode} */
     const node = {
       kind,
       route: dirPath,
@@ -899,11 +1229,12 @@ function walk(substrate, config) {
         if (!/\.md$/i.test(entry.name)) continue;
         const childParsed = readArtifactSafe(posixJoin(dirPath, entry.name));
         if (!childParsed) continue;
+        /** @type {OcpNode} */
         const childNode = {
           kind: 'artifact',
           route: childParsed.slug,
           path: childParsed.path,
-          name: childParsed.slug.split('/').pop(),
+          name: /** @type {string} */ (childParsed.slug.split('/').pop()),
           displayName: displayFor(childParsed.slug, childParsed.displayName),
           role: childParsed.role,
           artifactType: childParsed.artifactType,
@@ -941,7 +1272,9 @@ function walk(substrate, config) {
     return node;
   }
 
-  const root = build('', '', { owningOrg: null, orgId: null, underOrgsDir: false }, true);
+  // Non-null by construction: build() returns null only for an already-visited
+  // directory, and the visited set is empty on this first call.
+  const root = /** @type {OcpNode} */ (build('', '', { owningOrg: null, orgId: null, underOrgsDir: false }, true));
 
   // COUNT PARITY (D12-R item 3). Every markdown file the walk read is either served as a
   // page, served as a directory landing, or recorded as a failure. Nothing is dropped.
@@ -990,6 +1323,14 @@ function walk(substrate, config) {
  * DISCOVERED.md / halt reporting (D12)
  * ------------------------------------------------------------------ */
 
+/**
+ * The D12 halt calculation. A failure rate above {@link HALT_THRESHOLD} means the
+ * substrate is not renderable and the caller should stop rather than ship a
+ * partial projection.
+ *
+ * @param {TreeInput} tree
+ * @returns {HaltStatus}
+ */
 function haltStatus(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   const failures = source.discovered || [];
@@ -1014,6 +1355,12 @@ function haltStatus(tree) {
   };
 }
 
+/**
+ * Render a `DISCOVERED.md` report of everything the walk could not parse.
+ *
+ * @param {TreeInput} tree
+ * @returns {string}
+ */
 function discoveredReport(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   const status = haltStatus(source);
@@ -1086,6 +1433,10 @@ function visibilityRank(scope) {
  * half of this; `conformance()` consumes the diagnostic half, which is what turns a
  * misspelled token from a silent scope change into a reported error.
  */
+/**
+ * @param {unknown} value Raw `visibility` frontmatter, scalar or list.
+ * @returns {VisibilityAnalysis}
+ */
 function analyzeVisibility(value) {
   const entries = Array.isArray(value) ? value : value === null || value === undefined ? [] : [value];
   const recognized = [];
@@ -1117,6 +1468,7 @@ function analyzeVisibility(value) {
   // Two DIFFERENT org tokens name two audiences and cannot be reconciled, so the value
   // fails closed to `platform` rather than silently picking one tenant over another.
   const conflictingOrgs = orgIds.size > 1;
+  /** @type {RequiredScope | null} */
   let scope = null;
   if (conflictingOrgs) {
     scope = 'platform';
@@ -1137,6 +1489,16 @@ function analyzeVisibility(value) {
   };
 }
 
+/**
+ * Resolve a raw `visibility` frontmatter value to the audience it names.
+ *
+ * Returns null when nothing in the value is recognized, in which case the caller
+ * falls through to path-derived scope. Several recognized tokens resolve to the
+ * **most restrictive**, independent of declaration order.
+ *
+ * @param {unknown} value Scalar or list, as authored.
+ * @returns {RequiredScope | null}
+ */
 function parseVisibility(value) {
   return analyzeVisibility(value).scope;
 }
@@ -1155,6 +1517,13 @@ function pathScope(node) {
  * half is PROPOSED syntax: grounding F-038 found zero files in the reference substrate
  * using it, so it is implemented but unexercised against real content.
  */
+/**
+ * Build the route to {@link RequiredScope} map. Path derives the default;
+ * `visibility:` overrides it and cascades, resetting at each nested org boundary.
+ *
+ * @param {TreeInput} tree
+ * @returns {Record<string, RequiredScope>}
+ */
 function derivePolicy(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   if (!source || !source.root) throw new TypeError('derivePolicy expects an OcpTree (or { tree })');
@@ -1172,6 +1541,10 @@ function derivePolicy(tree) {
   return policy;
 }
 
+/**
+ * @param {Grants | null | undefined} grants
+ * @returns {NormalizedGrants}
+ */
 function normalizeGrants(grants) {
   const input = grants && typeof grants === 'object' ? grants : {};
   return {
@@ -1201,6 +1574,10 @@ function normalizeGrants(grants) {
  * Grants are already the flattened reachability projection: direct memberships plus the
  * downward-admin cascade, resolved by the identity provider. ocp-core never expands an
  * org id, which is exactly how P11's "non-admin roles never cascade" is preserved.
+ *
+ * @param {Grants} grants
+ * @param {RequiredScope} scope
+ * @returns {boolean} True if this viewer may FETCH the artifact at this scope.
  */
 function canView(grants, scope) {
   const g = normalizeGrants(grants);
@@ -1230,12 +1607,25 @@ function canView(grants, scope) {
  * needs unlisted pages in a staff navigation tree should take an explicit option at the
  * one call site that needs it, so the decision is auditable and greppable, never
  * acquirable by accident through a grants object.
+ *
+ * @param {Grants} grants
+ * @param {RequiredScope} scope
+ * @returns {boolean} True if the artifact at this scope may appear in a LIST built for
+ *   this viewer. Always false for `'unlisted'`, for every viewer.
  */
 function isListed(grants, scope) {
   if (scope === 'unlisted') return false;
   return canView(grants, scope);
 }
 
+/**
+ * Exact match, else nearest ancestor prefix, else `'platform'`. A route that was
+ * never walked still resolves, and it resolves fail-closed.
+ *
+ * @param {Record<string, RequiredScope>} policy
+ * @param {string} route
+ * @returns {RequiredScope}
+ */
 function lookupScope(policy, route) {
   const key = String(route === undefined || route === null ? '' : route).replace(/^\/+|\/+$/g, '');
   if (Object.prototype.hasOwnProperty.call(policy, key)) return policy[key];
@@ -1253,11 +1643,26 @@ function lookupScope(policy, route) {
  * a `visibility: [public]` artifact nested under a scope the viewer cannot see is not
  * surfaced, because surfacing it would leak the path that contains it.
  */
+/**
+ * Prune a tree to one viewer. Every predicate call inside is an enumeration, so all
+ * of them use {@link isListed}.
+ *
+ * Pruning is fail-closed at the first invisible ancestor: a `public` artifact nested
+ * under a scope the viewer cannot see is not surfaced, because surfacing it would leak
+ * the path containing it. The returned policy map and `discovered` list are scoped the
+ * same way, since both are keyed by route and are therefore disclosure themselves.
+ *
+ * @param {TreeInput} tree
+ * @param {Grants} grants
+ * @returns {FilteredTree}
+ */
 function filterTree(tree, grants) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   const policy = source.policy || derivePolicy(source);
   const g = normalizeGrants(grants);
+  /** @type {OcpNode[]} */
   const nodes = [];
+  /** @type {Record<string, OcpNode>} */
   const byRoute = {};
 
   // Every predicate call in this function is an ENUMERATION, so all three are isListed
@@ -1320,6 +1725,14 @@ function pageUrl(route, baseUrl) {
  * llms.txt, markdown content negotiation, OG images — must derive from this function's
  * output. Unscoped enumeration on a request path is banned.
  */
+/**
+ * THE single disclosure chokepoint. Every read surface must derive from this.
+ *
+ * @param {TreeInput} context
+ * @param {Grants} grants
+ * @param {CorpusOptions} [options]
+ * @returns {ScopedCorpus}
+ */
 function scopedCorpus(context, grants, options) {
   const opts = options || {};
   const tree = context && context.root === undefined && context.tree ? context.tree : context;
@@ -1365,6 +1778,16 @@ function scopedCorpus(context, grants, options) {
  * scoping was left to caller convention, which is not a chokepoint. Detection is
  * structural: `filterTree` attaches the normalized `grants` it filtered against, so its
  * presence is the proof that filtering happened.
+ *
+ * The parameter type is the filtered shape, so passing a raw {@link OcpTree} is a
+ * COMPILE error and not only a runtime throw. That is the point of the annotation:
+ * the guard has to be visible to the compiler at the call site, where the developer
+ * can still choose correctly.
+ *
+ * @param {ScopedTreeInput} tree Output of {@link filterTree}, or a
+ *   {@link ScopedCorpus} (its `tree` field is unwrapped). A raw `walk()` result is rejected.
+ * @param {ProjectOptions} [options]
+ * @returns {PageTree}
  */
 function project(tree, options) {
   const opts = options || {};
@@ -1378,10 +1801,15 @@ function project(tree, options) {
   }
   if (!source.root) throw new TypeError('project expects an OcpTree (or { tree })');
 
+  /**
+   * @param {OcpNode} node
+   * @returns {PageTreePage | PageTreeFolder}
+   */
   function toChild(node) {
     if (node.kind === 'artifact') {
       return { type: 'page', name: node.displayName, url: pageUrl(node.route, baseUrl) };
     }
+    /** @type {PageTreeFolder} */
     const folder = { type: 'folder', name: node.displayName, children: node.children.map(toChild) };
     if (node.entryPoint) {
       folder.index = { type: 'page', name: node.displayName, url: pageUrl(node.route, baseUrl) };
@@ -1400,6 +1828,13 @@ function project(tree, options) {
 /**
  * A scoped llms.txt-style plain-text projection. It takes a corpus, never a tree, so
  * that it is structurally impossible to render it from unscoped content.
+ */
+/**
+ * A scoped `llms.txt`-style projection. It takes a corpus and never a tree, so it is
+ * structurally impossible to render from unscoped content.
+ *
+ * @param {ScopedCorpus} corpus
+ * @returns {string}
  */
 function llmsText(corpus) {
   if (!corpus || !Array.isArray(corpus.pages)) {
@@ -1432,6 +1867,12 @@ function llmsText(corpus) {
 
 const CORE_CANON_PATTERN = /^#{1,6}[ \t]+core[ \t]+canon[ \t]*$/im;
 
+/**
+ * Check a substrate against the OCP conventions. Errors fail the check; warnings do not.
+ *
+ * @param {TreeInput} tree
+ * @returns {ConformanceResult}
+ */
 function conformance(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   if (!source || !source.root) throw new TypeError('conformance expects an OcpTree (or { tree })');
@@ -1543,6 +1984,17 @@ function conformance(tree) {
  * Open reaches everything except `platform`, and enumerates everything except `platform`
  * and `unlisted`.
  */
+/**
+ * Everything-public adapter, for a single-tenant or genuinely public substrate.
+ * **Never deploy it multi-tenant.**
+ *
+ * It declares an explicit open posture rather than claiming platform-admin identity,
+ * and it does not reach `platform` scope: an open wiki has no staff, so `_users/**`
+ * membership declarations must not become readable merely because authentication is
+ * switched off.
+ *
+ * @returns {GrantsPort}
+ */
 function openGrants() {
   return {
     kind: 'open',
@@ -1552,10 +2004,14 @@ function openGrants() {
   };
 }
 
+/**
+ * @param {unknown} request
+ * @returns {string | null}
+ */
 function tokenFromRequest(request) {
   if (typeof request === 'string') return request.trim() === '' ? null : request.trim();
   if (!request || typeof request !== 'object') return null;
-  const headers = request.headers;
+  const headers = /** @type {Record<string, any>} */ (request).headers;
   if (!headers) return null;
   const get = (name) =>
     typeof headers.get === 'function' ? headers.get(name) : headers[name] || headers[name.toLowerCase()];
@@ -1575,6 +2031,13 @@ function tokenFromRequest(request) {
  *   OCP_ORG_TOKENS={"tok-acme":["acme"],"tok-multi":["beta","gamma"]}
  *
  * Anything unrecognized resolves to zero reach (fail closed).
+ */
+/**
+ * Static token allowlist adapter for CI, previews, and small deployments. Anything
+ * unrecognized resolves to zero reach.
+ *
+ * @param {Record<string, string | undefined>} [env] Defaults to `process.env`.
+ * @returns {GrantsPort}
  */
 function envGrants(env) {
   const source = env && typeof env === 'object' ? env : process.env;

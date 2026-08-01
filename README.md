@@ -82,6 +82,20 @@ sales, operations, and support functions without first hiring someone to transla
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
 
+## 0.5.1
+
+> **Upgrade from 0.5.0.** `walk()` threw on any substrate containing a **symlink loop**,
+> which is the package entry point, so the library was unusable against such a tree.
+> Introduced in 0.5.0 and fixed here. `0.5.0` is deprecated on npm.
+>
+> The count-parity assertion that caused it is now **directional**: it throws only on the
+> direction that means data loss (a file read but never rendered and never recorded) and
+> records a diagnostic on the harmless direction. Both of the false alarms this assertion
+> has produced were the harmless direction.
+
+Also in 0.5.1: **TypeScript declarations**, generated from source. See
+[TypeScript](#typescript) below. No other runtime behavior changed.
+
 ## Install
 
 ```sh

@@ -14,6 +14,7 @@ test('the public export surface is stable', () => {
     'ARTIFACT_TYPES',
     'CONTENT_DIRS',
     'HALT_THRESHOLD',
+    'KERNEL_DIRS',
     'PROTOCOL',
     'SUBSTRATE_DIRS',
     'VERSION',
@@ -27,6 +28,7 @@ test('the public export surface is stable', () => {
     'filterTree',
     'haltStatus',
     'isListed',
+    'isReadableNode',
     'llmsText',
     'lookupScope',
     'openGrants',
@@ -42,6 +44,9 @@ test('the canon constants are frozen and correct', () => {
   assert.deepEqual(ocp.ARTIFACT_TYPES, ['note', 'adr', 'prompt', 'template', 'report']);
   assert.deepEqual(ocp.ALTITUDES, ['platform', 'tenant', 'agency', 'account', 'user']);
   assert.deepEqual(ocp.SUBSTRATE_DIRS, ['_kernels', '_adrs', '_system', '_users']);
+  // ADR-020 §14.7 R2: SUBSTRATE_DIRS minus `_users`, which is the one that is not kernel.
+  assert.deepEqual(ocp.KERNEL_DIRS, ['_kernels', '_adrs', '_system']);
+  assert.equal(Object.isFrozen(ocp.KERNEL_DIRS), true);
   assert.deepEqual(ocp.CONTENT_DIRS, ['notes', 'prompts', 'templates', 'reports', 'initiatives', 'orgs']);
   assert.equal(Object.isFrozen(ocp.ARTIFACT_TYPES), true);
   assert.equal(Object.isFrozen(ocp.ALTITUDES), true);

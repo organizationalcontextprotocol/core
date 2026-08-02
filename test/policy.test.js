@@ -15,15 +15,22 @@ function withTree(files, fn) {
   }
 }
 
+// Rewritten for ADR-020 §14.7 R2 and R3 (0.6.0). Every assertion below previously read
+// `internal`, which `canView` grants to any viewer holding any org at all, real or not.
+// The protocol kernel is now `public` by derivation and the root's own content takes the
+// graph-root organization's scope.
 test('derivePolicy derives ownership from the path', () => {
   withTree(baseFixture(), (tree) => {
     const policy = derivePolicy(tree);
 
-    assert.equal(policy[''], 'internal');
-    assert.equal(policy['notes'], 'internal');
-    assert.equal(policy['notes/handbook'], 'internal');
-    assert.equal(policy['_system'], 'internal');
-    assert.equal(policy['_kernels/initiative'], 'internal');
+    // R3: the substrate root is an org, and this content is that org's content.
+    assert.deepEqual(policy[''], { org: 'acme-platform' });
+    assert.deepEqual(policy['notes'], { org: 'acme-platform' });
+    assert.deepEqual(policy['notes/handbook'], { org: 'acme-platform' });
+    // R2: protocol machinery, scaffolded identically into every substrate.
+    assert.equal(policy['_system'], 'public');
+    assert.equal(policy['_kernels/initiative'], 'public');
+    // The one substrate dir that is not kernel: it decides authorization.
     assert.equal(policy['_users'], 'platform');
     assert.equal(policy['_users/ada/memberships'], 'platform');
 
@@ -179,33 +186,54 @@ test('filterTree prunes at the first invisible ancestor', () => {
   });
 });
 
-// Documented limitation (README "Known limitation", grounding F-016). Pruning at the
-// first invisible ancestor means a nested tenant needs reach to every org on its path.
-// This test exists to lock the documented behavior, not to bless it.
-test('a nested tenant granted only its own org sees none of its own content', () => {
+// This test previously locked the OPPOSITE assertion, under the title "a nested tenant
+// granted only its own org sees none of its own content", and its own comment said it
+// existed to lock the documented behavior rather than to bless it. ADR-020 §14.7 R1
+// resolved the question it was holding open: reach is the ancestor relation, so the
+// ancestor is retained as a structural stub and the tenant reaches its own subtree.
+test('a nested tenant granted only its own org reaches its own content through ancestor stubs', () => {
   withTree(baseFixture(), (tree) => {
     const betaOnly = filterTree(tree, { isPlatformAdmin: false, orgs: ['beta'] });
-    // The walk is cut at orgs/alpha, which requires { org: 'alpha' }.
-    assert.equal(betaOnly.nodes.some((node) => node.route.includes('beta')), false);
-    assert.equal(betaOnly.byRoute['orgs/alpha'], undefined);
-    // Shared root-org content is still reachable, which is why this fails quietly.
-    assert.ok(betaOnly.byRoute['notes/handbook']);
 
-    const withAncestor = filterTree(tree, { isPlatformAdmin: false, orgs: ['alpha', 'beta'] });
-    const routes = withAncestor.nodes.map((node) => node.route);
-    assert.ok(routes.includes('orgs/alpha/orgs/beta/notes/deposit-program'));
-    // Still no sibling leakage.
+    // Its own subtree is reachable. This is what R1 exists for.
+    assert.ok(betaOnly.byRoute['orgs/alpha/orgs/beta/notes/deposit-program']);
+
+    // The ancestor on the path is retained, but only as a corridor.
+    assert.equal(betaOnly.byRoute['orgs/alpha'].stub, true);
+    assert.equal(betaOnly.byRoute['orgs/alpha'].body, undefined);
+    assert.equal(betaOnly.byRoute['orgs/alpha/notes/playbook'], undefined, 'no parent content');
+
+    // R3: root-org content is NOT shared any more. It belongs to the graph-root org.
+    assert.equal(betaOnly.byRoute['notes/handbook'], undefined);
+
+    // Siblings of the path stay invisible at every altitude.
+    const routes = betaOnly.nodes.map((node) => node.route);
     assert.equal(routes.some((route) => route.startsWith('orgs/bravo')), false);
+
+    // Holding the ancestor grant too turns the stub into a real page.
+    const withAncestor = filterTree(tree, { isPlatformAdmin: false, orgs: ['alpha', 'beta'] });
+    assert.ok(withAncestor.byRoute['orgs/alpha/orgs/beta/notes/deposit-program']);
+    assert.notEqual(withAncestor.byRoute['orgs/alpha'].stub, true);
+    assert.equal(withAncestor.nodes.some((node) => node.route.startsWith('orgs/bravo')), false);
   });
 });
 
-test('a platform admin sees the whole tree; a viewer with no reach sees nothing', () => {
+test('a platform admin sees the whole tree; an ungranted viewer sees only the kernel', () => {
   withTree(baseFixture(), (tree) => {
     const all = filterTree(tree, { isPlatformAdmin: true, orgs: [] });
     assert.equal(all.nodes.length, tree.nodes.length);
+    assert.equal(all.nodes.some((node) => node.stub === true), false, 'an admin sees no stubs');
 
+    // Before R2 this saw literally nothing. The protocol kernel is now public by
+    // derivation, so an ungranted viewer reaches the machinery and nothing else: no root
+    // content, no org content, no `_users`.
     const none = filterTree(tree, { isPlatformAdmin: false, orgs: [] });
-    assert.equal(none.root, null);
-    assert.equal(none.nodes.length, 0);
+    assert.ok(none.root, 'the root is retained as a stub so the kernel is navigable');
+    assert.equal(none.root.stub, true);
+    const readable = none.nodes.filter((node) => node.stub !== true).map((node) => node.route);
+    assert.ok(readable.length > 0);
+    for (const route of readable) {
+      assert.match(route, /^(_kernels|_system)(\/|$)/, `an ungranted viewer reached ${route}`);
+    }
   });
 });

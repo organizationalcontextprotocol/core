@@ -28,6 +28,15 @@ const ALTITUDES = Object.freeze(['platform', 'tenant', 'agency', 'account', 'use
 // ADR-020 §6: underscore-prefixed DIRECTORIES are substrate.
 const SUBSTRATE_DIRS = Object.freeze(['_kernels', '_adrs', '_system', '_users']);
 
+// ADR-020 §14.7 R2: the protocol's own machinery, scaffolded identically into every OCP
+// substrate and containing no authored organizational content. These derive to `public`,
+// because an org's agent cannot operate the protocol without reading them and a
+// scaffolded substrate should be born working rather than born unreadable.
+//
+// `_users` is the one SUBSTRATE_DIR deliberately absent: it holds membership
+// declarations, which are the files that decide authorization.
+const KERNEL_DIRS = Object.freeze(SUBSTRATE_DIRS.filter((dir) => dir !== '_users'));
+
 // ADR-020 §6: the uniform, un-prefixed content directories.
 const CONTENT_DIRS = Object.freeze(['notes', 'prompts', 'templates', 'reports', 'initiatives', 'orgs']);
 
@@ -178,7 +187,51 @@ const WIKILINK_PATTERN = /\[\[([^\][|]+)(?:\|([^\][]*))?\]\]/g;
  * @property {string | null} owningOrg
  * @property {OcpNode[]} children
  * @property {ArtifactProblem[]} problems
+ * @property {false} [stub] Never true on a walked node. Present so that {@link OcpStubNode}
+ *   is a discriminated union member: narrow on `node.stub === true` and TypeScript gives
+ *   you the stub in one branch and the readable node in the other.
  */
+
+/**
+ * An ancestor retained purely so a granted descendant is reachable. ADR-020 §14.7 R1.
+ *
+ * **This is deliberately NOT assignable to {@link OcpNode}**, and the missing properties
+ * are the point rather than an omission. A stub has no `body`, no `displayName`, no
+ * `frontmatter`, no `links`, and no `entryPoint`, so passing one to any function typed
+ * against `OcpNode` is a compile error rather than a page that renders blank. A renderer
+ * that walks a filtered tree must handle the stub branch explicitly.
+ *
+ * The predicate pair points the opposite way from `unlisted`, which is why the split in
+ * {@link canView} and {@link isListed} keeps earning its keep:
+ *
+ *   isListed(stub) -> true    it must appear in navigation, or the grant is unreachable
+ *   canView(stub)  -> false   there is no page at this route to fetch
+ *
+ * Its `name` is the raw path segment. A stub carries no authored label, because a
+ * display name is content about an organization this viewer cannot read.
+ *
+ * @typedef {object} OcpStubNode
+ * @property {true} stub
+ * @property {OcpNodeKind} kind
+ * @property {string} route
+ * @property {string} path
+ * @property {string} name The path segment. Never an authored display name.
+ * @property {Array<OcpNode | OcpStubNode>} children
+ */
+
+/** @typedef {OcpNode | OcpStubNode} FilteredNode */
+
+/**
+ * Narrow a filtered tree's node to the readable half. Every projection in this file
+ * routes through it, so the stub branch is handled once rather than remembered at each
+ * site. A renderer consuming `FilteredTree` wants the same guard.
+ *
+ * @param {FilteredNode} node
+ * @returns {node is OcpNode} True when the node carries a page.
+ */
+function isReadableNode(node) {
+  return node.stub !== true;
+}
 
 /**
  * A file or directory the walk could not read or parse. `kind` partitions the list:
@@ -215,9 +268,12 @@ const WIKILINK_PATTERN = /\[\[([^\][|]+)(?:\|([^\][]*))?\]\]/g;
  * filtering happened, and it is what {@link project} checks.
  *
  * @typedef {object} FilteredTree
- * @property {OcpNode | null} root Null when the viewer cannot see the root itself.
- * @property {OcpNode[]} nodes
- * @property {Record<string, OcpNode>} byRoute
+ * @property {FilteredNode | null} root Null when the viewer reaches nothing at all. It is
+ *   an {@link OcpStubNode} whenever the viewer reaches only descendants of the root, which
+ *   is the ordinary case for a nested tenant.
+ * @property {FilteredNode[]} nodes Readable nodes and R1 ancestor stubs, mixed. Narrow on
+ *   `node.stub === true` before touching any page-bearing field.
+ * @property {Record<string, FilteredNode>} byRoute
  * @property {Discovered[]} discovered
  * @property {string | null} sha
  * @property {OcpConfig} config
@@ -1518,11 +1574,37 @@ function parseVisibility(value) {
   return analyzeVisibility(value).scope;
 }
 
-function pathScope(node) {
+/**
+ * ADR-020 §14.7 R2 and R3. Four cases, in this order, and the order is load-bearing.
+ *
+ * Before 0.6.0 the default here was `internal`, which `canView` grants to any viewer
+ * holding any org at all. That put the protocol kernel AND the graph-root org's own
+ * README and roster behind a credential that a fabricated org slug satisfied.
+ *
+ * @param {OcpNode} node
+ * @param {string | null} rootOrgId The graph-root org's `org_id`, or null if it declares none.
+ * @returns {RequiredScope}
+ */
+function pathScope(node, rootOrgId) {
+  // R3, fourth row: `orgs/<slug>/**` keeps its tenant scope. Unchanged, and first,
+  // because a nested `_system/` inside an org is that org's content, not protocol kernel.
   if (node.owningOrg) return { org: node.owningOrg };
-  // Membership declarations decide authorization, so reading them needs platform reach.
-  if (node.route.split('/')[0] === '_users') return 'platform';
-  return 'internal';
+
+  const first = node.route === '' ? '' : node.route.split('/')[0];
+
+  // R2: the protocol kernel is public by derivation. No declaration, no migration.
+  if (KERNEL_DIRS.includes(first)) return 'public';
+
+  // R3, second row. Membership declarations decide authorization, so reading them
+  // needs platform reach. This is the one substrate dir that is not kernel.
+  if (first === '_users') return 'platform';
+
+  // R3, third row: the substrate root is an organization and everything else at the root
+  // is that organization's content. The root README is not machinery; it carries
+  // `role: org_definition` and a `members:` roster.
+  //
+  // Fail closed when it declares no `org_id`: an unattributable root is not a public one.
+  return rootOrgId ? { org: rootOrgId } : 'platform';
 }
 
 /**
@@ -1543,13 +1625,25 @@ function derivePolicy(tree) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   if (!source || !source.root) throw new TypeError('derivePolicy expects an OcpTree (or { tree })');
   const policy = {};
+  // R3: the graph-root organization's identity, read from the root README's `org_id`.
+  // `walk` already resolves it onto the root node and deliberately leaves `owningOrg`
+  // null there, because only orgs beneath an `orgs/` directory own a routable tenant
+  // scope. Null here means the root declares no org, which fails closed in pathScope.
+  // A policy cannot be derived from an already-filtered tree: its stubs carry no
+  // frontmatter, so the result would silently under-report scope for exactly the routes
+  // that most need it. `filterTree` carries its own scoped policy map, so this is never
+  // a legitimate call, and it is louder to say so than to derive a wrong answer.
+  if (!isReadableNode(source.root)) {
+    throw new TypeError('derivePolicy expects an unfiltered OcpTree: this tree root is an R1 ancestor stub');
+  }
+  const rootOrgId = source.root.kind === 'org' ? stringOrNull(source.root.orgId) : null;
   function visit(node, inheritedVisibility, inheritedOwner) {
     const declared = parseVisibility(node.visibility);
     // A nested org boundary resets an inherited cascade. Without this, one
     // `visibility: [public]` at the graph root would publish every tenant subtree.
     const carried = node.owningOrg === inheritedOwner ? inheritedVisibility : null;
     const effective = declared || carried;
-    policy[node.route] = effective || pathScope(node);
+    policy[node.route] = effective || pathScope(node, rootOrgId);
     for (const child of node.children) visit(child, effective, node.owningOrg);
   }
   visit(source.root, null, source.root.owningOrg);
@@ -1562,6 +1656,27 @@ function derivePolicy(tree) {
  */
 function normalizeGrants(grants) {
   const input = grants && typeof grants === 'object' ? grants : {};
+  // A GrantsPort is not a Grants. Passing the port here reads no reach fields off it, so
+  // it normalizes to zero reach and every predicate then denies: safe, silent, and
+  // indistinguishable from "this viewer legitimately sees nothing".
+  //
+  // Failing closed is not the same as failing loud. An empty surface with no diagnostic
+  // invites the operator to loosen whatever is nearest until content appears, which is
+  // the dangerous direction, so this is a throw rather than a warning. See DISCOVERED #79
+  // for the three prior instances of the same shape in this package.
+  //
+  // The test is deliberately narrow: an object carrying BOTH reach fields and a `resolve`
+  // method is a grants object with an extra property, not a port, and is not punished.
+  if (
+    typeof (/** @type {any} */ (input).resolve) === 'function' &&
+    input.isPlatformAdmin === undefined &&
+    input.orgs === undefined
+  ) {
+    throw new TypeError(
+      'expected Grants but received a GrantsPort: call port.resolve(request) and pass the result, ' +
+        'never the port itself'
+    );
+  }
   return {
     isPlatformAdmin: input.isPlatformAdmin === true,
     orgs: Array.isArray(input.orgs) ? input.orgs.map((org) => String(org)).filter(Boolean) : [],
@@ -1675,16 +1790,53 @@ function filterTree(tree, grants) {
   const source = tree && tree.root === undefined && tree.tree ? tree.tree : tree;
   const policy = source.policy || derivePolicy(source);
   const g = normalizeGrants(grants);
-  /** @type {OcpNode[]} */
+  /** @type {FilteredNode[]} */
   const nodes = [];
-  /** @type {Record<string, OcpNode>} */
+  /** @type {Record<string, FilteredNode>} */
   const byRoute = {};
 
-  // Every predicate call in this function is an ENUMERATION, so all three are isListed
+  // Every predicate call in this function is an ENUMERATION, so all of them are isListed
   // rather than canView. A tree, a policy map, and a discovered list are all lists.
+  //
+  // ADR-020 §14.7 R1: reach is the ancestor relation. A node is retained if its own scope
+  // is listed for this viewer, OR it is an ancestor of a node that is. The second clause
+  // is what makes a nested tenant reachable at all: before it, pruning halted at the first
+  // invisible ancestor, so a viewer granted only `orgs/<parent>/orgs/<child>` saw zero of
+  // their own pages because the parent sat on the path down to them.
+  //
+  // Two passes, because retention of a node depends on its descendants.
+  /** @type {Map<string, {direct: boolean, retain: boolean}>} */
+  const marks = new Map();
+  function mark(node) {
+    const direct = isListed(g, lookupScope(policy, node.route));
+    let anyDescendant = false;
+    for (const child of node.children) {
+      if (mark(child)) anyDescendant = true;
+    }
+    const retain = direct || anyDescendant;
+    marks.set(node.route, { direct, retain });
+    return retain;
+  }
+  mark(source.root);
+
   function visit(node) {
-    if (!isListed(g, lookupScope(policy, node.route))) return null;
-    const copy = Object.assign({}, node, { children: [] });
+    const state = marks.get(node.route);
+    if (!state || !state.retain) return null;
+    // An ancestor reached only by the second clause is a STRUCTURAL STUB: path segment
+    // and slug, nothing else. Not a filtered page, because a renderer must not be able to
+    // hand one to a page-rendering path and get an empty page instead of a type error.
+    // Every page-bearing field is absent rather than nulled, which is what makes the stub
+    // structurally non-assignable to OcpNode.
+    const copy = state.direct
+      ? /** @type {any} */ (Object.assign({}, node, { children: [] }))
+      : /** @type {any} */ ({
+          stub: true,
+          kind: node.kind,
+          route: node.route,
+          path: node.path,
+          name: node.name,
+          children: []
+        });
     nodes.push(copy);
     byRoute[copy.route] = copy;
     for (const child of node.children) {
@@ -1704,6 +1856,10 @@ function filterTree(tree, grants) {
   // exists to withhold.
   const scopedPolicy = {};
   for (const route of Object.keys(byRoute)) {
+    // A stub carries no page, so there is no fetch to gate and no entry to publish. Its
+    // scope is deliberately omitted: `lookupScope` then fails closed to `platform` for
+    // that route, which is the correct answer to "may this viewer fetch the ancestor".
+    if (!isReadableNode(byRoute[route])) continue;
     if (Object.prototype.hasOwnProperty.call(policy, route)) scopedPolicy[route] = policy[route];
   }
 
@@ -1757,6 +1913,10 @@ function scopedCorpus(context, grants, options) {
   const baseUrl = opts.baseUrl === undefined ? DEFAULT_BASE_URL : opts.baseUrl;
 
   const pages = filtered.nodes
+    // The stub guard is first and is not redundant: a stub has no `entryPoint` property
+    // at all, so `entryPoint !== null` is vacuously true for one and it would otherwise
+    // land in the corpus as a page with no body. R1 stubs are navigation, never content.
+    .filter(isReadableNode)
     .filter((node) => node.kind === 'artifact' || node.entryPoint !== null)
     .map((node) => ({
       route: node.route,
@@ -1817,10 +1977,18 @@ function project(tree, options) {
   if (!source.root) throw new TypeError('project expects an OcpTree (or { tree })');
 
   /**
-   * @param {OcpNode} node
+   * @param {FilteredNode} node
    * @returns {PageTreePage | PageTreeFolder}
    */
   function toChild(node) {
+    // An R1 ancestor stub is a corridor, not a door. It renders as a folder so the granted
+    // descendant is navigable, and it never gets an `index` page, because there is nothing
+    // to fetch at its route. Its label is the raw path segment: a stub carries no
+    // `displayName`, since that would disclose authored content about an org the viewer
+    // cannot read.
+    if (!isReadableNode(node)) {
+      return { type: 'folder', name: node.name, children: node.children.map(toChild) };
+    }
     if (node.kind === 'artifact') {
       return { type: 'page', name: node.displayName, url: pageUrl(node.route, baseUrl) };
     }
@@ -1834,10 +2002,12 @@ function project(tree, options) {
 
   const root = source.root;
   const children = root.children.map(toChild);
-  if (root.entryPoint) {
+  // The root itself is a stub whenever the viewer reaches only descendants of it, which
+  // is the common case for a nested tenant. It contributes no index page then.
+  if (isReadableNode(root) && root.entryPoint) {
     children.unshift({ type: 'page', name: root.displayName, url: pageUrl(root.route, baseUrl) });
   }
-  return { name: root.displayName, children };
+  return { name: isReadableNode(root) ? root.displayName : root.name, children };
 }
 
 /**
@@ -1863,7 +2033,10 @@ function llmsText(corpus) {
       : scope.orgs.length > 0
         ? `orgs: ${scope.orgs.join(', ')}`
         : 'public only';
-  const title = corpus.tree && corpus.tree.root ? corpus.tree.root.displayName : 'OCP substrate';
+  const rootNode = corpus.tree ? corpus.tree.root : null;
+  // A stub root carries no authored label, so fall back to the generic title rather than
+  // to its path segment, which is the empty string at the root.
+  const title = rootNode && isReadableNode(rootNode) ? rootNode.displayName : 'OCP substrate';
   const lines = [`# ${title}`, ''];
   lines.push(
     `> Projection of an OCP substrate (${PROTOCOL.spec}), rendered by ocp-core ${VERSION} for a viewer scoped to ${scopeLabel}. Substrate SHA: ${corpus.sha || 'unversioned'}.`
@@ -1893,11 +2066,22 @@ function conformance(tree) {
   if (!source || !source.root) throw new TypeError('conformance expects an OcpTree (or { tree })');
   const problems = [];
 
+  /**
+   * @param {OcpNode} node
+   * @param {string} code
+   * @param {'error' | 'warning'} severity
+   * @param {string} message
+   */
   function add(node, code, severity, message) {
     problems.push({ path: node.entryPoint || node.path, route: node.route, code, severity, message });
   }
 
   for (const node of source.nodes) {
+    // Conformance is a question about authored content, and an R1 ancestor stub carries
+    // none: it exists so a granted descendant is reachable. Checking one would report a
+    // missing README for a directory the viewer was never shown in the first place.
+    // Passing a filtered tree here is unusual but legal, so this is a skip, not a throw.
+    if (!isReadableNode(node)) continue;
     // `visibility` diagnostics. Before these existed, a misspelled token parsed to nothing
     // and the route fell through to path-derived scope with no signal at all, which meant
     // a typo silently widened or narrowed who could read a page.
@@ -1976,6 +2160,35 @@ function conformance(tree) {
         );
       }
     }
+  }
+
+  // ADR-020 §14.7 R3 makes a misplaced root entry a SCOPING error rather than a tidiness
+  // one: anything at the substrate root that is not kernel and not `_users` silently
+  // takes the graph-root organization's scope. A directory that was meant to live under
+  // an org therefore becomes readable by the wrong audience, with nothing to notice it.
+  //
+  // A warning rather than an error, because the substrate still resolves and the correct
+  // destination is a judgment call the tool should not make on the author's behalf.
+  const ROOT_ALLOWED_FILES = ['README', 'AGENTS', 'DISCOVERED'];
+  const rootOrgSlug =
+    isReadableNode(source.root) && source.root.kind === 'org' ? stringOrNull(source.root.orgId) : null;
+  for (const child of source.root.children) {
+    if (!isReadableNode(child)) continue;
+    const segment = child.route.split('/')[0];
+    if (SUBSTRATE_DIRS.includes(segment)) continue;
+    if (CONTENT_DIRS.includes(segment)) continue;
+    if (child.kind === 'artifact' && ROOT_ALLOWED_FILES.includes(segment)) continue;
+    const suggestion = rootOrgSlug
+      ? `orgs/${rootOrgSlug}/${CONTENT_DIRS[0]}/`
+      : `orgs/<slug>/${CONTENT_DIRS[0]}/`;
+    add(
+      child,
+      'root-entry-misplaced',
+      'warning',
+      `"${segment}" is not a canonical root entry (expected one of ${SUBSTRATE_DIRS.concat(CONTENT_DIRS).join(', ')}, ` +
+        `or README.md / AGENTS.md / DISCOVERED.md); under ADR-020 §14.7 R3 it silently takes the graph-root ` +
+        `organization's scope, so it probably belongs under ${suggestion} or another org's content directory`
+    );
   }
 
   return { ok: problems.every((problem) => problem.severity !== 'error'), problems };
@@ -2086,6 +2299,7 @@ module.exports = {
   ARTIFACT_TYPES,
   ALTITUDES,
   SUBSTRATE_DIRS,
+  KERNEL_DIRS,
   CONTENT_DIRS,
   HALT_THRESHOLD,
   defineConfig,
@@ -2098,6 +2312,7 @@ module.exports = {
   parseVisibility,
   canView,
   isListed,
+  isReadableNode,
   lookupScope,
   filterTree,
   scopedCorpus,

@@ -82,6 +82,33 @@ sales, operations, and support functions without first hiring someone to transla
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
 
+## 0.6.0
+
+> **Breaking: path derivation changed.** ADR-020 §14.7 rules how a path becomes a scope, and
+> the rules are restrictive in some directions and permissive in others. **Any deployed instance
+> must re-verify its access matrix before upgrading.** There is no migration to run and no
+> config key to set; the new defaults are derived.
+>
+> | | 0.5.1 | 0.6.0 |
+> |---|---|---|
+> | `_kernels/`, `_adrs/`, `_system/` | `internal` | **`public`** (R2) |
+> | root README, `AGENTS.md`, root content dirs | `internal` | **the graph-root org's scope** (R3) |
+> | a nested tenant granted only its own org | **zero pages** | its own subtree, through ancestor stubs (R1) |
+> | anything deriving to `internal` | 19 nodes on the reference substrate | **none** (R4) |
+>
+> Three defects motivated it, each reproduced against a real substrate rather than argued.
+> **`internal` had no credential**: `canView` asked only whether grants named *any* org, so a
+> grant naming an organization that does not exist read every `internal` node. **Nested reach
+> failed closed to the point of uselessness**: a viewer granted only a nested child saw none of
+> their own content. **`internal` was doing two jobs**: it covered both the protocol kernel,
+> which every adopter needs to read, and the root organization's own roster, which nobody
+> outside it should.
+>
+> Also in 0.6.0: `filterTree` returns `OcpNode | OcpStubNode`, and a stub is **not assignable to
+> `OcpNode`**, so a renderer that hands one to a page path gets a compile error. `conformance()`
+> gains a `root-entry-misplaced` warning. Passing a `GrantsPort` where `Grants` is expected now
+> **throws** instead of silently resolving to zero reach.
+
 ## 0.5.1
 
 > **Upgrade from 0.5.0.** `walk()` threw on any substrate containing a **symlink loop**,
@@ -559,52 +586,54 @@ wiki with holes in it.
 
 #### `derivePolicy(tree) → { [route]: RequiredScope }`
 
+Derivation follows ADR-020 §14.7 (R2 and R3), **changed in 0.6.0**:
+
 | Path | Derived scope | Why |
 |---|---|---|
-| `` (graph root) | `internal` | the root org's entry point |
-| `notes/`, `prompts/`, `templates/`, `reports/`, `initiatives/` | `internal` | the root org's own content |
-| `_adrs/`, `_kernels/`, `_system/` | `internal` | substrate definitions every member needs to operate (P21) |
-| `_users/**` | `platform` | membership declarations decide authorization; reading them is a platform act |
+| `_adrs/`, `_kernels/`, `_system/` | `public` | **R2.** The protocol's own machinery, scaffolded identically into every substrate. An org's agent cannot operate the protocol without reading them, so a scaffolded substrate is born working rather than born unreadable. |
+| `_users/**` | `platform` | the one substrate directory that is not kernel: membership declarations decide authorization |
+| `` (graph root), `AGENTS.md` | `{ org: <root org_id> }` | **R3.** The root README carries `role: org_definition` and a `members:` roster. It is the graph-root organization's own definition, not machinery. |
+| `notes/`, `prompts/`, `templates/`, `reports/`, `initiatives/`, `orgs/` | `{ org: <root org_id> }` | **R3.** Root content directories hold the graph-root organization's content. |
+| root README with no `org_id` | `platform` | **R3, fail closed.** An unattributable root is not a public one. |
 | `orgs/<id>/**` | `{ org: <id> }` | path-derived ownership; the **deepest** owning org wins |
 | anything with a declared `visibility:` | that value, cascading to descendants | frontmatter overrides the path — *proposed syntax*, see below |
 | an unknown route | `platform` | fail closed |
 
-Nothing is `public` unless something declares it. To publish a substrate, declare
-`visibility: [public]` on the graph-root README; it cascades.
+**Nothing derives to `internal` any more.** It remains a legal `visibility:` value meaning "any
+authenticated principal", reachable only by explicit declaration. Before 0.6.0 the default was
+`internal`, which put the protocol kernel *and* the root organization's own README and roster
+behind a credential that any org grant satisfied, including a grant naming an organization that
+does not exist.
 
 > ### Read this before deploying multi-tenant
 >
-> **`internal` means *any member of any organization*, not "staff only".** Combined with the
-> table above, that has a consequence worth stating plainly: **by default, a member of one client
-> org can read `_adrs/`, `_kernels/`, `_system/`, and all of the root org's `notes/`,
-> `reports/`, and `initiatives/`.**
+> **The trust boundary is your `GrantsPort`, and `ocp-core` validates nothing.**
 >
-> That default is deliberate for a single-organization substrate, where the conventions have to
-> be readable by everyone who authors against them (P21's thirty-minute bar). It is **the wrong
-> default the moment you host more than one tenant**, because platform decision records and the
-> root org's operating notes are rarely meant for a client.
+> An adapter must return only grants it has **verified against an authenticated session**.
+> `ocp-core` treats what you return as authoritative: it cannot do otherwise, because it has no
+> access to the identity system that knows which organizations exist.
 >
-> Close it by declaring visibility on the directories that should not be broadly readable — it
-> cascades to everything beneath:
+> The sharp edge is `'internal'`, which is granted to any viewer holding **at least one** org
+> grant, real or not. An adapter that reads an org slug from a query parameter is therefore a
+> silent authorization bypass, with no error anywhere to notice it. Verify the session, then
+> return; never derive an org from anything the caller controls.
 >
-> ```yaml
-> ---
-> artifact_type: note
-> role: note
-> visibility: [platform]     # _adrs/README.md — and every ADR under it
-> ---
-> ```
+> Two further defaults worth checking against your deployment:
 >
-> Verify with the corpus itself rather than by reading the table:
+> - **The protocol kernel is world-readable** (R2). `_kernels/`, `_adrs/`, and `_system/` at the
+>   substrate root derive `public`. If you put commercial or personal material in them, it is
+>   published. Organizational content belongs under `orgs/<slug>/`, and `conformance()` warns
+>   about stray root entries for exactly this reason.
+> - **`openGrants()` is not anonymity.** It is an explicit everything-public posture that reaches
+>   every scope except `platform`. Anonymity is `{ isPlatformAdmin: false, orgs: [] }`, which
+>   after R2 reaches the kernel and nothing else. Never deploy `openGrants()` multi-tenant.
+>
+> Verify with the corpus itself rather than by reading any table:
 >
 > ```js
-> const client = scopedCorpus(tree, { isPlatformAdmin: false, orgs: ['some-client'] });
-> console.log(client.pages.map((page) => page.route)); // audit this list before you ship
+> const corpus = scopedCorpus(tree, await grantsPort.resolve(request));
+> console.log(corpus.pages.map((p) => p.route));
 > ```
->
-> There is no override hook on `derivePolicy` itself: `visibility:` frontmatter is the whole
-> mechanism, which is the F-038 caveat below applied to the one case where you are most likely
-> to need it.
 
 #### The `visibility` vocabulary
 
@@ -694,22 +723,51 @@ cascade **resets at a nested org boundary**. Without that, a single `visibility:
 graph root would silently publish every tenant subtree — exactly the disclosure class this
 library exists to prevent. A child org's own declaration still governs its subtree.
 
-#### Known limitation: a nested tenant needs reach to its ancestors
+#### Reach is the ancestor relation (R1), and traversal is not readability
 
-Because `filterTree` prunes at the first invisible ancestor, a viewer must be able to see **every
-org on the path** to the content they own. In a substrate shaped like
-`orgs/salesblaster/orgs/bingo-jets/…`, grants of `{ orgs: ['bingo-jets'] }` yield **zero**
-bingo-jets pages — the walk is cut at `orgs/salesblaster`, which requires
-`{ org: 'salesblaster' }`. Grants of `{ orgs: ['salesblaster', 'bingo-jets'] }` return the
-bingo-jets subtree correctly (and still expose no sibling client), but they also grant the whole
-`salesblaster` org, which is more than a client should have.
+**Resolved in 0.6.0.** Through 0.5.1 this section documented a limitation: `filterTree` pruned at
+the first invisible ancestor, so in a substrate shaped `orgs/<parent>/orgs/<child>/` a viewer
+granted only the child got **zero** pages, because the parent sat on the path down to their own
+content. The only workaround granted the whole parent org, which is far more than a client
+should have. ADR-020 §14.7 R1 ruled it.
 
-This is not an oversight to be worked around in a consumer; it is an **undecided policy question
-in the protocol**, recorded as grounding F-016: whether `derivePolicy` should mirror the auth
-layer's downward-admin reach, and whether an ancestor org directory should be traversable without
-being readable, has not been ruled on. `ocp-core` takes the conservative branch — fail closed,
-prune early, leak nothing — and leaves the ruling to canon. **A rework must resolve this before
-any deployment with orgs nested more than one level deep.**
+**A node is reachable if its scope is in the viewer's grants, or it is an ancestor of a node
+whose scope is.** Ancestors reached only by the second clause are returned as **structural
+stubs**: path segment and slug, and nothing else. No body, no `displayName`, no frontmatter, no
+`entryPoint`, and no children other than those on the path to a granted descendant. Siblings of
+that path are neither reachable nor enumerated.
+
+```js
+const filtered = filterTree(tree, { isPlatformAdmin: false, orgs: ['bingo-jets'] });
+filtered.byRoute['orgs/salesblaster'].stub;   // true (a corridor, not a door)
+filtered.byRoute['orgs/salesblaster'].body;   // undefined
+filtered.byRoute['orgs/salesblaster/notes'];  // undefined (no parent content)
+filtered.byRoute['orgs/salesblaster/orgs/bingo-jets/notes/offer'];  // a real page
+```
+
+A stub discloses nothing: a viewer at `/orgs/salesblaster/orgs/bingo-jets` already holds the
+parent slug in their own address. **Traversal is not readability**, and the distinction is what
+keeps the Directionality Invariant absolute: no principal reads an ancestor's content, ever.
+
+**The type makes this a compile error rather than a convention.** `OcpStubNode` is deliberately
+*not* assignable to `OcpNode`, because the page-bearing properties are absent rather than nulled, so
+handing a stub to anything typed against `OcpNode` fails to typecheck instead of rendering an
+empty page. Narrow with `node.stub === true`, or with the exported `isReadableNode(node)` guard.
+
+```ts
+for (const node of filtered.nodes) {
+  renderPage(node);                            // error: OcpStubNode is missing 15 properties
+  if (isReadableNode(node)) renderPage(node);  // fine
+}
+```
+
+This is the **third** distinct case the predicate split has paid for, and it points the opposite
+way from `unlisted`:
+
+| | `isListed` | `canView` |
+|---|---|---|
+| `unlisted` | ❌ never enumerated | ✅ the address is the credential |
+| an R1 stub | ✅ or the descendant is unreachable | ❌ there is no page to fetch |
 
 #### `canView(grants, scope) → boolean`
 
@@ -725,6 +783,10 @@ any deployment with orgs nested more than one level deep.**
 `'unlisted'` is ✅ for every column on purpose: possession of the address is the credential. The
 column that answers "does it show up in a list" is `isListed`, below, where `'unlisted'` is ❌ for
 every viewer.
+
+**`'internal'` is in this table but nothing derives to it after 0.6.0.** It survives as a legal
+`visibility:` value, reachable only by explicit declaration. Note what its row says: it is
+satisfied by *any* org grant, which is why R4 pairs it with the trust-boundary contract below.
 
 Admin authority cascades downward (P11) — but **that cascade happens in your identity provider,
 not here**. `grants.orgs` is already the flattened reachability projection (direct memberships
@@ -742,11 +804,16 @@ already uses it, so `scopedCorpus` and `llmsText` inherit it.
 Exact match, else nearest ancestor prefix, else `'platform'`. A route that was never walked
 still resolves — to its nearest known ancestor, and to `platform` if it has none.
 
-#### `filterTree(tree, grants) → OcpTree`
+#### `filterTree(tree, grants) → FilteredTree`
 
-A pruned tree. Pruning is fail-closed at the **first invisible ancestor**: a
-`visibility: [public]` artifact nested under a scope the viewer cannot see is *not* surfaced,
-because surfacing it would leak the path containing it.
+A pruned tree whose `nodes`, `byRoute`, and `root` hold `OcpNode | OcpStubNode`. A node is
+retained when its own scope is listed for this viewer, **or** it is an ancestor of one that is;
+the second case yields a stub (see R1 above). Everything else is pruned, including every sibling
+of the path.
+
+The scoped `policy` map deliberately **omits stub routes**: a stub has no page, so there is no
+fetch to gate, and `lookupScope` then fails closed to `platform` for that route, which is the
+correct answer to "may this viewer fetch the ancestor".
 
 ### `scopedCorpus(context, grants, options?)` — the chokepoint
 
@@ -852,8 +919,21 @@ has `severity: 'error'`.
 | `org-role-not-declared` | warning | an org README should declare `role: org_definition` |
 | `retired-org-type-field` | warning | `org_type` was retired 2026-07-21 |
 | `unterminated-frontmatter` / `unparsed-frontmatter-lines` | warning | tolerated malformation, surfaced rather than hidden |
+| `root-entry-misplaced` | warning | a substrate-root entry that is neither a substrate dir, a content dir, nor `README.md` / `AGENTS.md` / `DISCOVERED.md` (ADR-020 §14.7 R3) |
 
 Each problem is `{ path, route, code, severity, message }`.
+
+**`root-entry-misplaced` is a scoping check, not a tidiness one.** Under R3 anything at the
+substrate root that is not kernel and not `_users/` silently takes the graph-root organization's
+scope, so a directory that was meant to live under an org becomes readable by the wrong audience
+with nothing to notice it. It is a warning rather than an error because the substrate still
+resolves and the correct destination is a judgment the tool should not make for you.
+
+**Run it before a scoped deployment, not after.** A substrate missing `org_id` or
+`role: org_definition` on an org README **fails open**: that directory is not classified as an
+org, its path scope degrades, and content lands in the wrong audience. `conformance()` reports
+that as an error and `walk`'s `discovered` list does not, because `discovered` records I/O
+failures only and never content defects. An empty `discovered` does not mean a clean substrate.
 
 ### GrantsPort adapters
 
@@ -890,6 +970,29 @@ not become readable merely because authentication is switched off.
 `envGrants(env)` reads a static token allowlist from environment variables (defaulting to
 `process.env`) and fails closed on anything unrecognized. It accepts a bearer token, an
 `x-ocp-token` header, a `Headers`-like object with `.get()`, or a bare token string.
+
+> **A port is not a `Grants`.** `openGrants()` returns the port; `openGrants().resolve()` returns
+> the grants. Passing the port itself where grants are expected used to normalize to zero reach
+> and deny everything: safe, silent, and indistinguishable from a viewer who legitimately sees
+> nothing. Since 0.6.0 it **throws a `TypeError`**, because failing closed is not the same as
+> failing loud, and an empty surface with no diagnostic invites you to loosen whatever is nearest
+> until content appears.
+
+#### The trust boundary
+
+**An adapter must return only grants it has verified against an authenticated session.
+`ocp-core` treats them as authoritative and validates nothing.**
+
+It cannot do otherwise: it has no access to the identity system that knows which organizations
+exist, so validating an org id here would mean inventing a directory it does not have. The sharp
+edge is `'internal'`, which is satisfied by **any** org grant, including one naming an
+organization that does not exist. An adapter that reads an org slug from a query parameter is
+therefore a silent authorization bypass. Verify the session, then return; never derive an org
+from anything the caller controls.
+
+This is the same shape as the address-entropy obligation on `unlisted`: a responsibility that
+provably cannot live in a projection library, named explicitly and assigned to the component
+that can discharge it, rather than left for whoever gets it wrong first.
 
 #### Wiring a real identity provider
 
@@ -951,9 +1054,9 @@ Named non-goals, not oversights. Each has the condition that would reopen it.
 | An external search service | a measured memory threshold breached in production |
 | A plugin architecture for `ocp-core` | Rule of Three across **external** consumers, not internal surfaces |
 
-Known limitations of what *is* here, stated plainly: the
-[nested-tenant ancestor-reach problem](#known-limitation-a-nested-tenant-needs-reach-to-its-ancestors)
-is unresolved and blocks any deployment with orgs nested more than one level deep; `walk` retains
+Known limitations of what *is* here, stated plainly: the nested-tenant ancestor-reach problem
+[is resolved in 0.6.0](#reach-is-the-ancestor-relation-r1-and-traversal-is-not-readability) and no
+longer blocks deep nesting; `walk` retains
 every artifact body in memory, which is fine at a few hundred files and unmeasured beyond that;
 `conformance` has no per-type frontmatter schema; there is no link-graph resolution or validation
 across artifacts; and nothing in this package enforces that a consumer actually calls
@@ -962,7 +1065,7 @@ across artifacts; and nothing in this package enforces that a consumer actually 
 ## Status
 
 Source lives in [organizationalcontextprotocol/core](https://github.com/organizationalcontextprotocol/core).
-The package is on npm at `0.3.x` while the protocol documentation and the reference renderer are
+The package is on npm at `0.6.x` while the protocol documentation and the reference renderer are
 built out. Expect breaking changes at every minor version until `1.0`.
 
 ## Related

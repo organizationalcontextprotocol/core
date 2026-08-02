@@ -8,6 +8,7 @@ declare const _exports: {
     ARTIFACT_TYPES: readonly string[];
     ALTITUDES: readonly string[];
     SUBSTRATE_DIRS: readonly string[];
+    KERNEL_DIRS: readonly string[];
     CONTENT_DIRS: readonly string[];
     HALT_THRESHOLD: number;
     defineConfig: typeof defineConfig;
@@ -20,6 +21,7 @@ declare const _exports: {
     parseVisibility: typeof parseVisibility;
     canView: typeof canView;
     isListed: typeof isListed;
+    isReadableNode: typeof isReadableNode;
     lookupScope: typeof lookupScope;
     filterTree: typeof filterTree;
     scopedCorpus: typeof scopedCorpus;
@@ -165,7 +167,179 @@ export type OcpNode = {
     owningOrg: string | null;
     children: OcpNode[];
     problems: ArtifactProblem[];
+    /**
+     * Never true on a walked node. Present so that {@link OcpStubNode}is a discriminated union member: narrow on `node.stub === true` and TypeScript gives
+     * you the stub in one branch and the readable node in the other.
+     */
+    stub?: false;
 };
+export type OcpStubNode = {
+    stub: true;
+    kind: OcpNodeKind;
+    route: string;
+    path: string;
+    /**
+     * The path segment. Never an authored display name.
+     */
+    name: string;
+    children: Array<OcpNode | OcpStubNode>;
+};
+export type FilteredNode = OcpNode | OcpStubNode;
+/**
+ * A token as an author writes it in `visibility:` frontmatter.
+ *
+ * The prefixed forms all resolve to the same org scope. `org:` is the canonical
+ * emission spelling; `account:`, `tenant:` and `agency:` are accepted aliases
+ * retained under ADR-041's additive-only plus tolerant-reader policy.
+ *
+ * Note that `account`, `tenant` and `agency` are also OCP ALTITUDE terms. The two
+ * axes are unrelated and happen to share three words.
+ *
+ * @typedef {'public' | 'unlisted' | 'internal' | 'platform'
+ *   | `org:${string}` | `account:${string}` | `tenant:${string}` | `agency:${string}`} VisibilityToken
+ */
+/**
+ * The resolved audience a route requires, after parsing and cascade.
+ *
+ * This is the OUTPUT vocabulary and it is not the same as {@link VisibilityToken}:
+ * the four prefixed spellings have collapsed into one `{ org }` shape by the time
+ * a scope exists.
+ *
+ * @typedef {'public' | 'unlisted' | 'internal' | 'platform' | { org: string }} RequiredScope
+ */
+/**
+ * A viewer's reach, already flattened by the identity provider.
+ *
+ * `orgs` is the flattened reachability projection, direct memberships plus the
+ * downward-admin cascade. `ocp-core` never expands an org id.
+ *
+ * @typedef {object} Grants
+ * @property {boolean} [isPlatformAdmin] Staff reach. Absent means false.
+ * @property {string[]} [orgs] Org slugs this viewer reaches. Absent means none.
+ * @property {boolean} [open] Explicit "authentication is switched off" posture, set
+ *   only by {@link openGrants}. **Absent means not open.** It is deliberately not the
+ *   same thing as platform-admin identity: open reaches every scope except `platform`,
+ *   and enumerates every scope except `platform` and `unlisted`.
+ */
+/** @typedef {{ isPlatformAdmin: boolean, orgs: string[], open: boolean }} NormalizedGrants */
+/** @typedef {{ name: string, type: 'file' | 'dir' }} SubstrateEntry */
+/**
+ * The read side of the substrate. One interface, one bundled implementation.
+ *
+ * @typedef {object} SubstratePort
+ * @property {(relPath: string) => string} read Read a file as UTF-8. May throw; the walk is fail-soft.
+ * @property {(relDir: string) => SubstrateEntry[]} list List a directory. May throw; the walk is fail-soft.
+ * @property {() => string | null} [sha] Optional substrate version stamp.
+ * @property {(relDir: string) => string | null} [realPath] Optional; lets the walker detect a
+ *   symlinked directory resolving to one it has already visited.
+ * @property {string} [kind]
+ * @property {string} [root]
+ */
+/**
+ * The identity seam. One method, so any session-issuing IdP wires in as a relying party.
+ *
+ * @typedef {object} GrantsPort
+ * @property {string} kind
+ * @property {(request?: unknown) => Grants} resolve
+ */
+/**
+ * @typedef {object} OcpConfig
+ * @property {string} substrateRoot
+ * @property {string[]} exclude
+ * @property {string | null} sourceBlobBase
+ * @property {Record<string, string>} displayOverrides
+ */
+/**
+ * @typedef {object} OcpConfigInput
+ * @property {string} [substrateRoot] Defaults to `'.'`.
+ * @property {string[]} [exclude] Defaults to the built-in exclude list.
+ * @property {string | null} [sourceBlobBase] Defaults to null.
+ * @property {Record<string, string>} [displayOverrides] Route to display name.
+ */
+/** @typedef {{ code: string, severity: 'error' | 'warning', message: string }} ArtifactProblem */
+/** @typedef {{ target: string, display: string | null, raw: string }} WikiLink */
+/**
+ * @typedef {object} Artifact
+ * @property {string} path
+ * @property {string} slug
+ * @property {string | null} artifactType
+ * @property {string | null} role
+ * @property {string} displayName
+ * @property {string | null} status
+ * @property {string | null} tenant
+ * @property {string[]} tags
+ * @property {VisibilityToken | VisibilityToken[] | string | string[] | null} visibility Raw frontmatter
+ *   value, unparsed. Run it through {@link parseVisibility} to get a {@link RequiredScope}.
+ * @property {number | null} trustTier
+ * @property {Record<string, unknown>} frontmatter
+ * @property {string} body
+ * @property {WikiLink[]} links
+ * @property {ArtifactProblem[]} problems
+ */
+/** @typedef {'org' | 'user' | 'kernel' | 'substrate-dir' | 'content-dir' | 'artifact'} OcpNodeKind */
+/**
+ * @typedef {object} OcpNode
+ * @property {OcpNodeKind} kind
+ * @property {string} route
+ * @property {string} path
+ * @property {string} name
+ * @property {string} displayName
+ * @property {string | null} role
+ * @property {string | null} artifactType
+ * @property {string | null} status
+ * @property {string | null} tenant
+ * @property {string[]} tags
+ * @property {VisibilityToken | VisibilityToken[] | string | string[] | null} visibility
+ * @property {number | null} trustTier
+ * @property {Record<string, unknown>} frontmatter
+ * @property {string} body
+ * @property {WikiLink[]} links
+ * @property {string | null} entryPoint The README that stands in for a directory, else null.
+ * @property {string | null} orgId
+ * @property {string | null} parentOrgId
+ * @property {string | null} owningOrg
+ * @property {OcpNode[]} children
+ * @property {ArtifactProblem[]} problems
+ * @property {false} [stub] Never true on a walked node. Present so that {@link OcpStubNode}
+ *   is a discriminated union member: narrow on `node.stub === true` and TypeScript gives
+ *   you the stub in one branch and the readable node in the other.
+ */
+/**
+ * An ancestor retained purely so a granted descendant is reachable. ADR-020 §14.7 R1.
+ *
+ * **This is deliberately NOT assignable to {@link OcpNode}**, and the missing properties
+ * are the point rather than an omission. A stub has no `body`, no `displayName`, no
+ * `frontmatter`, no `links`, and no `entryPoint`, so passing one to any function typed
+ * against `OcpNode` is a compile error rather than a page that renders blank. A renderer
+ * that walks a filtered tree must handle the stub branch explicitly.
+ *
+ * The predicate pair points the opposite way from `unlisted`, which is why the split in
+ * {@link canView} and {@link isListed} keeps earning its keep:
+ *
+ *   isListed(stub) -> true    it must appear in navigation, or the grant is unreachable
+ *   canView(stub)  -> false   there is no page at this route to fetch
+ *
+ * Its `name` is the raw path segment. A stub carries no authored label, because a
+ * display name is content about an organization this viewer cannot read.
+ *
+ * @typedef {object} OcpStubNode
+ * @property {true} stub
+ * @property {OcpNodeKind} kind
+ * @property {string} route
+ * @property {string} path
+ * @property {string} name The path segment. Never an authored display name.
+ * @property {Array<OcpNode | OcpStubNode>} children
+ */
+/** @typedef {OcpNode | OcpStubNode} FilteredNode */
+/**
+ * Narrow a filtered tree's node to the readable half. Every projection in this file
+ * routes through it, so the stub branch is handled once rather than remembered at each
+ * site. A renderer consuming `FilteredTree` wants the same guard.
+ *
+ * @param {FilteredNode} node
+ * @returns {node is OcpNode} True when the node carries a page.
+ */
+declare function isReadableNode(node: FilteredNode): node is OcpNode;
 export type Discovered = {
     kind: 'file' | 'directory';
     path: string;
@@ -199,11 +373,17 @@ export type OcpTree = {
 };
 export type FilteredTree = {
     /**
-     * Null when the viewer cannot see the root itself.
+     * Null when the viewer reaches nothing at all. It is
+     * an {@link OcpStubNode} whenever the viewer reaches only descendants of the root, which
+     * is the ordinary case for a nested tenant.
      */
-    root: OcpNode | null;
-    nodes: OcpNode[];
-    byRoute: Record<string, OcpNode>;
+    root: FilteredNode | null;
+    /**
+     * Readable nodes and R1 ancestor stubs, mixed. Narrow on
+     * `node.stub === true` before touching any page-bearing field.
+     */
+    nodes: FilteredNode[];
+    byRoute: Record<string, FilteredNode>;
     discovered: Discovered[];
     sha: string | null;
     config: OcpConfig;

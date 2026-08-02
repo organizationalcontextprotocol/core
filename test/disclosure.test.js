@@ -56,12 +56,21 @@ test('the isolation is symmetric — bravo sees zero of alpha', () => {
   });
 });
 
-test('an anonymous viewer sees nothing at all in a substrate that declares no public scope', () => {
+// The old title was "sees nothing at all in a substrate that declares no public scope",
+// and its premise stopped being true at 0.6.0: under ADR-020 §14.7 R2 every substrate has
+// a public scope whether it declares one or not, because the protocol kernel is public by
+// derivation. What must still hold is that the kernel is ALL an anonymous viewer gets.
+test('an anonymous viewer sees the protocol kernel and no organizational content', () => {
   withTree((tree) => {
     const corpus = scopedCorpus(tree, ANON);
-    assert.equal(corpus.pages.length, 0);
-    assert.equal(corpus.text, '');
-    assert.equal(corpus.tree.root, null);
+    assert.ok(corpus.pages.length > 0, 'the kernel is readable without a credential');
+    for (const page of corpus.pages) {
+      assert.match(page.route, /^(_kernels|_system)(\/|$)/, `anonymous reached ${page.route}`);
+    }
+    assert.equal(corpus.text.includes('Alpha secret sauce'), false);
+    assert.equal(corpus.text.includes('Bravo confidential pricing'), false);
+    assert.equal(corpus.pages.some((page) => page.route === ''), false, 'no root org README');
+    assert.equal(corpus.pages.some((page) => page.route.startsWith('_users')), false);
   });
 });
 

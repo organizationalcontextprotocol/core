@@ -35,6 +35,21 @@ test('a directory without a README.md is an error (P20)', () => {
   assert.equal(problem.severity, 'error');
 });
 
+test('an _archive/ directory is excluded: no README is required and nothing in it is walked (ADR-OCP-003 §5)', () => {
+  const files = baseFixture();
+  files['notes/_archive/old-draft.md'] = 'a scratchpad with no frontmatter\n';
+  const dir = writeSubstrate(files);
+  try {
+    const tree = walk(createFileSystemSubstrate(dir), { substrateRoot: dir });
+    assert.equal(Object.keys(tree.byRoute).some((route) => route.split('/').includes('_archive')), false);
+    const result = conformance(tree);
+    assert.deepEqual(result.problems, []);
+    assert.equal(result.ok, true);
+  } finally {
+    removeSubstrate(dir);
+  }
+});
+
 test('an artifact_type outside the closed five is an error (P16)', () => {
   const files = baseFixture();
   files['notes/handbook.md'] = note(

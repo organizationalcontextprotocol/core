@@ -59,7 +59,7 @@ test('the canon constants are frozen and correct', () => {
 test('defineConfig fills the four documented keys with defaults', () => {
   assert.deepEqual(defineConfig(), {
     substrateRoot: '.',
-    exclude: ['.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets'],
+    exclude: ['.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets', '_archive'],
     sourceBlobBase: null,
     displayOverrides: {}
   });

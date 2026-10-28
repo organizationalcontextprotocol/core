@@ -422,7 +422,7 @@ const { defineConfig } = require('ocp-core');
 defineConfig({ substrateRoot: '../../../AIOS' });
 // {
 //   substrateRoot: '../../../AIOS',
-//   exclude: [ '.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets' ],
+//   exclude: [ '.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets', '_archive' ],
 //   sourceBlobBase: null,
 //   displayOverrides: {}
 // }
@@ -431,7 +431,7 @@ defineConfig({ substrateRoot: '../../../AIOS' });
 | Key | Default | Meaning |
 |---|---|---|
 | `substrateRoot` | `'.'` | where the substrate lives on disk |
-| `exclude` | `['.git','node_modules','DISCOVERED.md','CLAUDE.md','assets']` | entry names skipped during the walk |
+| `exclude` | `['.git','node_modules','DISCOVERED.md','CLAUDE.md','assets','_archive']` | entry names skipped during the walk; `_archive` is ADR-OCP-003 §5's layer 0, excluded from the walk and from strict lint |
 | `sourceBlobBase` | `null` | base URL for "view source" links, e.g. `https://github.com/acme/aios/blob/main` |
 | `displayOverrides` | `{}` | route → display name, for the handful of names you want to force |
 

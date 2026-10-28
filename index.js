@@ -43,7 +43,10 @@ const CONTENT_DIRS = Object.freeze(['notes', 'prompts', 'templates', 'reports', 
 // D12: a per-file failure rate above 10% is a HALT condition, not a warning.
 const HALT_THRESHOLD = 0.1;
 
-const DEFAULT_EXCLUDE = Object.freeze(['.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets']);
+// ADR-OCP-003 §5: `_archive/` is layer 0 of the selection lattice, removed before enumeration and from
+// strict lint, and the reserved-names registry gives it the `excluded` posture. Walking it made a README-less
+// archive fail `missing-readme`, a requirement §5.8 says an archive never carries.
+const DEFAULT_EXCLUDE = Object.freeze(['.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets', '_archive']);
 
 const ENTRY_POINT = 'README.md';
 const DEFAULT_BASE_URL = '/docs';

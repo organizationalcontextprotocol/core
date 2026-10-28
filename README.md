@@ -82,6 +82,15 @@ sales, operations, and support functions without first hiring someone to transla
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
 
+## 0.7.0 (unreleased)
+
+> **Behavior change: `_archive/` is no longer walked.** `_archive` joins the default `exclude`
+> list (ADR-OCP-003 §5: layer 0, removed before enumeration; §5.5: an archive's README "is never
+> required"). `walk`, `project`, `scopedCorpus` and `llmsText` therefore drop every `_archive/`
+> subtree, and `validate` no longer reports `missing-readme` inside one. A renderer that showed
+> archived pages must now opt in by passing its own `exclude` without `_archive`. A config that
+> already passes an explicit `exclude` keeps its list, so add `_archive` to it.
+
 ## 0.6.0
 
 > **Breaking: path derivation changed.** ADR-020 §14.7 rules how a path becomes a scope, and
@@ -319,7 +328,7 @@ Recursive and uniform. **The repository root is itself an organization** — the
 
 Three conventions carry the weight:
 
-**README-as-index (P20).** Every directory has a `README.md` entry point, and its `role:`
+**README-as-index (P20).** Every directory has a `README.md` entry point (an `_archive/` is not walked, ADR-OCP-003 §5), and its `role:`
 frontmatter field declares the directory's purpose — `org_definition`, `user_definition`,
 `kernel_index`, `kernel_definition`, `org_structure_definition`, `artifact_types_definition`.
 **There is no `index.md` anywhere in OCP.** Additionally, every `role: org_definition` README
@@ -910,7 +919,7 @@ has `severity: 'error'`.
 
 | Code | Severity | Rule |
 |---|---|---|
-| `missing-readme` | error | every directory has a `README.md` entry point (P20) |
+| `missing-readme` | error | every directory has a `README.md` entry point (P20); an `_archive/` is excluded from the walk and never checked |
 | `missing-frontmatter` | error | every artifact is self-describing (P17) |
 | `missing-artifact-type` | error | frontmatter declares `artifact_type` (P16/P17) |
 | `unknown-artifact-type` | error | the type is one of the closed five (P16) |

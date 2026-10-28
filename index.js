@@ -45,7 +45,8 @@ const HALT_THRESHOLD = 0.1;
 
 // ADR-OCP-003 §5: `_archive/` is layer 0 of the selection lattice, removed before enumeration and from
 // strict lint, and the reserved-names registry gives it the `excluded` posture. Walking it made a README-less
-// archive fail `missing-readme`, a requirement §5.8 says an archive never carries.
+// archive fail `missing-readme`, though §5.5 says an archive's README "is never required" and §5.8 relaxes
+// strict lint inside it.
 const DEFAULT_EXCLUDE = Object.freeze(['.git', 'node_modules', 'DISCOVERED.md', 'CLAUDE.md', 'assets', '_archive']);
 
 const ENTRY_POINT = 'README.md';

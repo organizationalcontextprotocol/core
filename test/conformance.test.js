@@ -50,6 +50,40 @@ test('an _archive/ directory is excluded: no README is required and nothing in i
   }
 });
 
+test("the scaffold's own replacement example validates: a report superseding one in reports/_archive/", () => {
+  const files = baseFixture();
+  files['reports/README.md'] = note(
+    { artifact_type: 'note', role: 'note', status: 'active', tenant: 'acme', created: '2026-07-01T00:00:00Z', updated: '2026-07-01T00:00:00Z', tags: '[]' },
+    '# Reports'
+  );
+  files['reports/_archive/2026-07-23-weekly-status.md'] = note(
+    { artifact_type: 'report', role: 'weekly_status', status: 'archived', tenant: 'acme', created: '2026-07-23T00:00:00Z', updated: '2026-07-23T00:00:00Z', tags: '[]' },
+    '# Weekly status'
+  );
+  files['reports/2026-07-24-weekly-status.md'] = [
+    '---',
+    'artifact_type: report',
+    'role: weekly_status',
+    'status: active',
+    'tenant: acme',
+    'version: 1.0.0',
+    'supersedes: reports/_archive/2026-07-23-weekly-status.md',
+    'archived_refs:',
+    '  - path: reports/_archive/2026-07-23-weekly-status.md',
+    '    reason: replaced in full by this report',
+    'created: 2026-07-24T00:00:00Z',
+    'updated: 2026-07-24T00:00:00Z',
+    'tags: []',
+    '---',
+    '',
+    '# Weekly status',
+    ''
+  ].join('\n');
+  const result = check(files);
+  assert.deepEqual(result.problems, []);
+  assert.equal(result.ok, true);
+});
+
 test('an artifact_type outside the closed five is an error (P16)', () => {
   const files = baseFixture();
   files['notes/handbook.md'] = note(

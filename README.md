@@ -82,7 +82,7 @@ sales, operations, and support functions without first hiring someone to transla
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
 
-## 0.7.0 (unreleased)
+## 0.7.0
 
 > **Behavior change: `_archive/` is no longer walked.** `_archive` joins the default `exclude`
 > list (ADR-OCP-003 §5: layer 0, removed before enumeration; §5.5: an archive's README "is never

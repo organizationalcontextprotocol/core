@@ -747,14 +747,14 @@ stubs**: path segment and slug, and nothing else. No body, no `displayName`, no 
 that path are neither reachable nor enumerated.
 
 ```js
-const filtered = filterTree(tree, { isPlatformAdmin: false, orgs: ['bingo-jets'] });
-filtered.byRoute['orgs/salesblaster'].stub;   // true (a corridor, not a door)
-filtered.byRoute['orgs/salesblaster'].body;   // undefined
-filtered.byRoute['orgs/salesblaster/notes'];  // undefined (no parent content)
-filtered.byRoute['orgs/salesblaster/orgs/bingo-jets/notes/offer'];  // a real page
+const filtered = filterTree(tree, { isPlatformAdmin: false, orgs: ['northwind'] });
+filtered.byRoute['orgs/acme'].stub;   // true (a corridor, not a door)
+filtered.byRoute['orgs/acme'].body;   // undefined
+filtered.byRoute['orgs/acme/notes'];  // undefined (no parent content)
+filtered.byRoute['orgs/acme/orgs/northwind/notes/offer'];  // a real page
 ```
 
-A stub discloses nothing: a viewer at `/orgs/salesblaster/orgs/bingo-jets` already holds the
+A stub discloses nothing: a viewer at `/orgs/acme/orgs/northwind` already holds the
 parent slug in their own address. **Traversal is not readability**, and the distinction is what
 keeps the Directionality Invariant absolute: no principal reads an ancestor's content, ever.
 

@@ -138,11 +138,15 @@ test('GB-OCP007-03: a container that does not sit in an org directory is refused
   assert.deepEqual(recordCodes(tree), ['record-container-not-at-org-scope']);
 });
 
-test('GB-OCP007-05: a collection whose kind is not a record kind from the closed list is refused', () => {
+test('GB-OCP007-05: a collection with no kind, or a kind outside the record kinds of the closed list, is refused', () => {
   for (const kind of ['7', 'nine']) {
     const { tree } = validate(fixtureCorpus({ '_records/person/README.md': collectionReadme('person', kind) }));
     assert.ok(recordCodes(tree).includes('record-collection-kind-invalid'), `kind ${kind}`);
   }
+  const noKind = collectionReadme('person', 2).replace('  kind: 2\n', '');
+  assert.equal(noKind.includes('kind:'), false);
+  const { tree } = validate(fixtureCorpus({ '_records/person/README.md': noKind }));
+  assert.ok(recordCodes(tree).includes('record-collection-kind-invalid'), 'no kind');
 });
 
 test('GB-OCP007-06: a record carrying an event log is refused', () => {

@@ -542,6 +542,14 @@ function parseValue(raw) {
 
 const KEY_PATTERN = /^([^:\s][^:]*):(.*)$/;
 
+// A block scalar header (YAML 1.2 §8.1.1): `|` (literal) or `>` (folded), then an optional
+// indentation indicator digit and an optional chomping indicator, in either order.
+const BLOCK_SCALAR_HEADER = /^([|>])(?:([1-9])([+-])?|([+-])([1-9])?)?$/;
+
+// Nesting deeper than this is reported as unreadable instead of being recursed into, so a
+// hostile frontmatter block cannot exhaust the stack.
+const MAX_FRONTMATTER_DEPTH = 64;
+
 // `__proto__` is refused rather than assigned: assigning it on a plain object mutates
 // the prototype instead of creating an own property.
 function assign(target, key, value, skipped, line) {
@@ -552,138 +560,400 @@ function assign(target, key, value, skipped, line) {
   target[key] = value;
 }
 
-function trimTrailingBlank(lines) {
-  const out = lines.slice();
-  while (out.length > 0 && out[out.length - 1].trim() === '') out.pop();
-  return out;
+// Frontmatter lines travel as { text, no } records so an unreadable line can be reported
+// with its file line number. `ctx` carries the per-top-level-key state:
+//   skipped  lines refused outright (today only `__proto__`), reported as a warning;
+//   bad      lines that could not be read, which leave the whole top-level key unset;
+//   depth    current nesting depth.
+
+function isBlankLine(rec) {
+  return rec.text.trim() === '';
 }
 
-function collectIndentedBlock(lines, start) {
-  const block = [];
+function isCommentLine(rec) {
+  return /^\s*#/.test(rec.text);
+}
+
+function isNeutralLine(rec) {
+  return isBlankLine(rec) || isCommentLine(rec);
+}
+
+function realLines(recs) {
+  return recs.filter((rec) => !isNeutralLine(rec));
+}
+
+// The lines that belong to a node owned at column `col`: every following line indented
+// deeper than `col`, with blank lines (and, unless `commentsAreNeutral` is false, comment
+// lines at any indentation) carried along only when more owned lines follow them.
+function collectIndentedBlock(lines, start, col, commentsAreNeutral) {
   let i = start;
+  let end = start;
   while (i < lines.length) {
-    const line = lines[i];
-    if (line.trim() === '') {
-      block.push(line);
+    const rec = lines[i];
+    if (isBlankLine(rec) || (commentsAreNeutral && isCommentLine(rec))) {
       i += 1;
       continue;
     }
-    if (indentOf(line) === 0) break;
-    block.push(line);
+    if (indentOf(rec.text) <= col) break;
     i += 1;
+    end = i;
   }
-  return { block: trimTrailingBlank(block), next: i };
+  return { block: lines.slice(start, end), next: end };
 }
 
-function subBlockAfter(lines, index, base) {
-  const block = [];
-  let i = index + 1;
-  while (i < lines.length && indentOf(lines[i]) > base) {
-    block.push(lines[i]);
-    i += 1;
+// Flow folding (YAML 1.2 §6.5): segments are trimmed line contents, `null` marks a blank
+// line. A single line break folds to one space; each blank line becomes one newline.
+function foldSegments(segments) {
+  let out = '';
+  let started = false;
+  let breaks = 0;
+  for (const segment of segments) {
+    if (segment === null) {
+      if (started) breaks += 1;
+      continue;
+    }
+    if (started) out += breaks > 0 ? '\n'.repeat(breaks) : ' ';
+    out += segment;
+    started = true;
+    breaks = 0;
   }
-  return { block, next: i };
+  return out;
 }
 
-function parseIndentedBlock(blockLines, skipped) {
-  const lines = blockLines.filter((line) => line.trim() !== '');
-  if (lines.length === 0) return '';
-  const base = Math.min.apply(null, lines.map(indentOf));
-  return lines[0].trim().startsWith('-')
-    ? parseListBlock(lines, base, skipped)
-    : parseMapBlock(lines, base, skipped);
+// True when `text` is one complete flow sequence: it opens with `[` and its brackets
+// balance exactly at the last character. Quote handling matches splitTopLevelCommas.
+function isCompleteFlowSequence(text) {
+  if (!text.startsWith('[')) return false;
+  let depth = 0;
+  let quote = null;
+  for (let k = 0; k < text.length; k += 1) {
+    const ch = text[k];
+    if (quote) {
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (ch === '[') depth += 1;
+    else if (ch === ']') {
+      depth -= 1;
+      if (depth === 0) return k === text.length - 1;
+    }
+  }
+  return false;
 }
 
-function parseListBlock(lines, base, skipped) {
+// Index of the quote that closes the quoted scalar opening `text`, or -1.
+function closingQuoteIndex(text) {
+  const quote = text[0];
+  for (let k = 1; k < text.length; k += 1) {
+    const ch = text[k];
+    if (quote === '"' && ch === '\\') {
+      k += 1;
+      continue;
+    }
+    if (ch === quote) {
+      if (quote === "'" && text[k + 1] === "'") {
+        k += 1;
+        continue;
+      }
+      return k;
+    }
+  }
+  return -1;
+}
+
+function isQuotedKey(text) {
+  const close = closingQuoteIndex(text);
+  return close > 0 && /^\s*:(\s|$)/.test(text.slice(close + 1));
+}
+
+function flowSegmentsOf(recs) {
+  const segments = [];
+  for (const rec of recs) {
+    if (isBlankLine(rec)) segments.push(null);
+    else if (!isCommentLine(rec)) segments.push(stripInlineComment(rec.text).trim());
+  }
+  return segments;
+}
+
+function quotedSegmentsOf(recs) {
+  return recs.map((rec) => (isBlankLine(rec) ? null : rec.text.trim()));
+}
+
+// A flow sequence spread over several lines reads exactly as it would on one line.
+function readFlowSequence(segments, recs, ctx) {
+  const joined = foldSegments(segments);
+  if (!isCompleteFlowSequence(joined)) {
+    ctx.bad.push(...realLines(recs));
+    return '';
+  }
+  return parseValue(joined);
+}
+
+// A quoted scalar spread over several lines reads exactly as it would on one line. Only
+// a trailing comment may follow the closing quote.
+function readQuotedLines(segments, recs, ctx) {
+  const joined = foldSegments(segments);
+  const close = closingQuoteIndex(joined);
+  if (close === -1 || !/^(\s+#.*|\s*)$/.test(joined.slice(close + 1))) {
+    ctx.bad.push(...recs.filter((rec) => !isBlankLine(rec)));
+    return '';
+  }
+  return parseScalar(joined.slice(0, close + 1));
+}
+
+// A plain scalar continued on more-indented lines reads exactly as it would on one line.
+// A comment ends a plain scalar, so a continuation line after one is unreadable, and so is
+// a continuation line holding `: ` (YAML forbids it inside a multi-line plain scalar; it
+// is almost always a mis-indented key).
+function readPlainLines(firstSegment, endedOnFirstLine, recs, ctx) {
+  const segments = firstSegment === null ? [] : [firstSegment];
+  const bad = [];
+  let ended = endedOnFirstLine;
+  for (const rec of recs) {
+    if (isBlankLine(rec)) {
+      segments.push(null);
+      continue;
+    }
+    if (isCommentLine(rec)) {
+      ended = true;
+      continue;
+    }
+    if (ended) {
+      bad.push(rec);
+      continue;
+    }
+    const text = rec.text.trim();
+    const segment = stripInlineComment(text).trim();
+    if (segment !== text) ended = true;
+    if (/:(\s|$)/.test(segment)) {
+      bad.push(rec);
+      continue;
+    }
+    segments.push(segment);
+  }
+  if (bad.length > 0) {
+    ctx.bad.push(...bad);
+    return '';
+  }
+  return parseScalar(foldSegments(segments));
+}
+
+// YAML 1.2 §8.1.3 line folding over block scalar content lines (`null` = empty line):
+// lines fold with a space, empty lines become newlines, and more-indented lines keep the
+// line breaks around them.
+function foldBlockLines(body) {
+  let out = '';
+  let seen = false;
+  let empties = 0;
+  let previousMoreIndented = false;
+  for (const line of body) {
+    if (line === null) {
+      empties += 1;
+      continue;
+    }
+    const moreIndented = /^[ \t]/.test(line);
+    if (!seen) out += '\n'.repeat(empties);
+    else if (moreIndented || previousMoreIndented) out += '\n'.repeat(1 + empties);
+    else out += empties > 0 ? '\n'.repeat(empties) : ' ';
+    out += line;
+    seen = true;
+    previousMoreIndented = moreIndented;
+    empties = 0;
+  }
+  return out;
+}
+
+// A block scalar (YAML 1.2 §8.1) whose header sits on lines[i], owned at column
+// `ownerCol` (the key's column, or the dash's column for a sequence item). An explicit
+// indentation indicator m puts the content at ownerCol + m; otherwise the first non-empty
+// line sets it. Lines indented deeper than the owner but shallower than the content are
+// unreadable.
+function readBlockScalar(lines, i, ownerCol, header, ctx) {
+  const style = header[1];
+  const digit = header[2] || header[5];
+  const chomp = header[3] || header[4] || '';
+  const start = i + 1;
+  let indent = -1;
+  if (digit) {
+    indent = ownerCol + Number(digit);
+  } else {
+    let k = start;
+    while (k < lines.length && isBlankLine(lines[k])) k += 1;
+    if (k < lines.length && indentOf(lines[k].text) > ownerCol) indent = indentOf(lines[k].text);
+  }
+  /** @type {Array<string | null>} */
+  const content = [];
+  let j = start;
+  while (j < lines.length) {
+    const text = lines[j].text;
+    if (text.trim() === '') {
+      content.push(indent >= 0 && text.length > indent ? text.slice(indent) : null);
+      j += 1;
+      continue;
+    }
+    if (indent < 0 || indentOf(text) < indent) break;
+    content.push(text.slice(indent));
+    j += 1;
+  }
+  const strays = collectIndentedBlock(lines, j, ownerCol, true);
+  ctx.bad.push(...realLines(strays.block));
+  const next = strays.block.length > 0 ? strays.next : j;
+
+  let last = content.length - 1;
+  while (last >= 0 && content[last] === null) last -= 1;
+  const body = content.slice(0, last + 1);
+  const trailing = content.length - body.length;
+  const text = style === '|' ? body.map((line) => (line === null ? '' : line)).join('\n') : foldBlockLines(body);
+  let value;
+  if (chomp === '-') value = text;
+  else if (chomp === '+') value = body.length > 0 ? text + '\n'.repeat(1 + trailing) : '\n'.repeat(trailing);
+  else value = body.length > 0 ? `${text}\n` : '';
+  return { value, next };
+}
+
+// The value whose text after the `:` (or after the `- ` of a sequence item) is `rawRest`
+// on lines[i], owned at column `ownerCol`. Returns the value and the index of the first
+// line not consumed.
+function readValue(lines, i, rawRest, ownerCol, ctx) {
+  const rest = stripInlineComment(rawRest).trim();
+  const header = BLOCK_SCALAR_HEADER.exec(rest);
+  if (header) return readBlockScalar(lines, i, ownerCol, header, ctx);
+  const quoted = rest[0] === '"' || rest[0] === "'";
+  const kids = collectIndentedBlock(lines, i + 1, ownerCol, !quoted);
+  if (kids.block.length === 0) return { value: parseValue(rest), next: i + 1 };
+  if (rest === '') return { value: parseNode(kids.block, ctx), next: kids.next };
+  let value;
+  if (rest[0] === '[') {
+    value = readFlowSequence([rest].concat(flowSegmentsOf(kids.block)), [lines[i]].concat(kids.block), ctx);
+  } else if (quoted) {
+    value = readQuotedLines([rawRest.trim()].concat(quotedSegmentsOf(kids.block)), [lines[i]].concat(kids.block), ctx);
+  } else if (rest[0] === '{') {
+    // A flow map wrapped over several lines is outside the subset this parser reads.
+    ctx.bad.push(lines[i], ...realLines(kids.block));
+    value = '';
+  } else {
+    value = readPlainLines(rest, rest !== rawRest.trim(), kids.block, ctx);
+  }
+  return { value, next: kids.next };
+}
+
+// A node that starts on the line after its key: a block sequence, a block map, a flow
+// sequence, or a quoted or plain scalar spread over one or more lines.
+function parseNode(block, ctx) {
+  const real = realLines(block);
+  if (real.length === 0) return '';
+  if (ctx.depth >= MAX_FRONTMATTER_DEPTH) {
+    ctx.bad.push(...real);
+    return '';
+  }
+  let base = Infinity;
+  for (const rec of real) base = Math.min(base, indentOf(rec.text));
+  const first = real[0].text.trim();
+  ctx.depth += 1;
+  let value;
+  if (first.startsWith('-')) value = parseListBlock(block, base, ctx);
+  else if (first.startsWith('[')) value = readFlowSequence(flowSegmentsOf(block), block, ctx);
+  else if ((first[0] === '"' || first[0] === "'") && !isQuotedKey(first)) value = readQuotedLines(quotedSegmentsOf(block), block, ctx);
+  else if (KEY_PATTERN.test(first)) value = parseMapBlock(block, base, ctx);
+  else value = readPlainLines(null, false, block, ctx);
+  ctx.depth -= 1;
+  return value;
+}
+
+function parseListBlock(lines, base, ctx) {
   const items = [];
-  /** @type {Record<string, string> | null} */
+  /** @type {Record<string, unknown> | null} */
   let current = null;
   let i = 0;
   while (i < lines.length) {
-    const line = lines[i];
-    const ind = indentOf(line);
-    const text = line.trim();
+    const rec = lines[i];
+    if (isNeutralLine(rec)) {
+      i += 1;
+      continue;
+    }
+    const ind = indentOf(rec.text);
+    const text = rec.text.trim();
     if (ind === base && text.startsWith('-')) {
-      const itemText = stripInlineComment(text.slice(1)).trim();
+      const after = text.slice(1);
+      const itemText = stripInlineComment(after).trim();
       const keyed = KEY_PATTERN.exec(itemText);
       if (itemText === '') {
         current = {};
         items.push(current);
-      } else if (keyed) {
-        current = {};
-        assign(current, keyed[1].trim(), parseValue(stripInlineComment(keyed[2])), skipped, line);
-        items.push(current);
-      } else {
-        current = null;
-        items.push(parseValue(itemText));
+        i += 1;
+        continue;
       }
-      i += 1;
+      if (keyed) {
+        current = {};
+        const keyCol = base + 1 + (after.length - after.trimStart().length);
+        const read = readValue(lines, i, keyed[2], keyCol, ctx);
+        assign(current, keyed[1].trim(), read.value, ctx.skipped, rec.text);
+        items.push(current);
+        i = read.next;
+        continue;
+      }
+      current = null;
+      const read = readValue(lines, i, after, base, ctx);
+      items.push(read.value);
+      i = read.next;
       continue;
     }
-    if (ind > base && current !== null && typeof current === 'object') {
+    if (ind > base && current !== null) {
       const keyed = KEY_PATTERN.exec(text);
       if (keyed) {
-        const rest = stripInlineComment(keyed[2]).trim();
-        if (rest === '') {
-          const sub = subBlockAfter(lines, i, ind);
-          if (sub.block.length > 0) {
-            assign(current, keyed[1].trim(), parseIndentedBlock(sub.block, skipped), skipped, line);
-            i = sub.next;
-            continue;
-          }
-        }
-        assign(current, keyed[1].trim(), parseValue(rest), skipped, line);
-      } else {
-        skipped.push(line);
+        const read = readValue(lines, i, keyed[2], ind, ctx);
+        assign(current, keyed[1].trim(), read.value, ctx.skipped, rec.text);
+        i = read.next;
+        continue;
       }
-      i += 1;
-      continue;
     }
-    skipped.push(line);
+    ctx.bad.push(rec);
     i += 1;
   }
   return items;
 }
 
-function parseMapBlock(lines, base, skipped) {
+function parseMapBlock(lines, base, ctx) {
   const map = {};
   let i = 0;
   while (i < lines.length) {
-    const line = lines[i];
-    if (indentOf(line) !== base) {
-      skipped.push(line);
+    const rec = lines[i];
+    if (isNeutralLine(rec)) {
       i += 1;
       continue;
     }
-    const keyed = KEY_PATTERN.exec(line.trim());
+    const keyed = indentOf(rec.text) === base ? KEY_PATTERN.exec(rec.text.trim()) : null;
     if (!keyed) {
-      skipped.push(line);
+      ctx.bad.push(rec);
       i += 1;
       continue;
     }
-    const key = keyed[1].trim();
-    const rest = stripInlineComment(keyed[2]).trim();
-    if (rest === '') {
-      const sub = subBlockAfter(lines, i, base);
-      if (sub.block.length > 0) {
-        assign(map, key, parseIndentedBlock(sub.block, skipped), skipped, line);
-        i = sub.next;
-        continue;
-      }
-    }
-    assign(map, key, parseValue(rest), skipped, line);
-    i += 1;
+    const read = readValue(lines, i, keyed[2], base, ctx);
+    assign(map, keyed[1].trim(), read.value, ctx.skipped, rec.text);
+    i = read.next;
   }
   return map;
 }
 
+// Unreadable is an error, never a wrong value: when any line of a top-level key's value
+// cannot be read, the key is left unset and recorded once in `unreadable`, in document
+// order. Lines outside every key (before the first key, or a stray unindented line) and
+// refused `__proto__` keys stay in `skipped`, reported as a warning exactly as before.
 function parseFrontmatterBlock(block) {
   const data = {};
   const skipped = [];
-  const lines = block.split('\n');
+  /** @type {Array<{ key: string, line: number, lines: number[] }>} */
+  const unreadable = [];
+  // Line k of the block is file line k + 2: file line 1 is the opening `---`.
+  const lines = block.split('\n').map((text, k) => ({ text, no: k + 2 }));
   let i = 0;
   while (i < lines.length) {
-    const line = lines[i];
+    const rec = lines[i];
+    const line = rec.text;
     if (line.trim() === '' || /^\s*#/.test(line)) {
       i += 1;
       continue;
@@ -700,29 +970,45 @@ function parseFrontmatterBlock(block) {
       continue;
     }
     const key = keyed[1].trim();
-    const rest = stripInlineComment(keyed[2]).trim();
-    if (rest !== '') {
-      assign(data, key, parseValue(rest), skipped, line);
-      i += 1;
-      continue;
+    const ctx = { skipped, bad: /** @type {Array<{ text: string, no: number }>} */ ([]), depth: 0 };
+    const read = readValue(lines, i, keyed[2], 0, ctx);
+    let next = read.next;
+    if (next === i + 1 && stripInlineComment(keyed[2]).trim() === '') {
+      // A sequence at the key's own indentation (`key:` then `- item` at column 0) is
+      // outside the subset this parser reads; it must not leave the key as ''.
+      let k = next;
+      while (k < lines.length && isNeutralLine(lines[k])) k += 1;
+      if (k < lines.length && /^-(\s|$)/.test(lines[k].text)) {
+        while (k < lines.length) {
+          const t = lines[k].text;
+          if (isNeutralLine(lines[k])) {
+            k += 1;
+            continue;
+          }
+          if (indentOf(t) === 0 && !/^-(\s|$)/.test(t)) break;
+          ctx.bad.push(lines[k]);
+          k += 1;
+          next = k;
+        }
+      }
     }
-    const collected = collectIndentedBlock(lines, i + 1);
-    if (collected.block.length === 0) {
-      assign(data, key, '', skipped, line);
-      i += 1;
-      continue;
+    if (ctx.bad.length > 0) {
+      Reflect.deleteProperty(data, key);
+      const numbers = Array.from(new Set(ctx.bad.map((bad) => bad.no))).sort((a, b) => a - b);
+      unreadable.push({ key, line: rec.no, lines: numbers });
+    } else {
+      assign(data, key, read.value, skipped, line);
     }
-    assign(data, key, parseIndentedBlock(collected.block, skipped), skipped, line);
-    i = collected.next;
+    i = next;
   }
-  return { data, skipped };
+  return { data, skipped, unreadable };
 }
 
 function splitFrontmatter(text) {
   const normalized = normalizeNewlines(text);
   const lines = normalized.split('\n');
   if (lines[0] !== '---') {
-    return { frontmatter: {}, body: normalized, present: false, terminated: true, skipped: [] };
+    return { frontmatter: {}, body: normalized, present: false, terminated: true, skipped: [], unreadable: [] };
   }
   let end = -1;
   for (let i = 1; i < lines.length; i += 1) {
@@ -732,7 +1018,7 @@ function splitFrontmatter(text) {
     }
   }
   if (end === -1) {
-    return { frontmatter: {}, body: normalized, present: true, terminated: false, skipped: [] };
+    return { frontmatter: {}, body: normalized, present: true, terminated: false, skipped: [], unreadable: [] };
   }
   const parsed = parseFrontmatterBlock(lines.slice(1, end).join('\n'));
   return {
@@ -740,7 +1026,8 @@ function splitFrontmatter(text) {
     body: lines.slice(end + 1).join('\n').replace(/^\n/, ''),
     present: true,
     terminated: true,
-    skipped: parsed.skipped
+    skipped: parsed.skipped,
+    unreadable: parsed.unreadable
   };
 }
 
@@ -873,6 +1160,14 @@ function parseArtifact(source, opts) {
       code: 'unparsed-frontmatter-lines',
       severity: 'warning',
       message: `${split.skipped.length} frontmatter line(s) could not be parsed and were skipped`
+    });
+  }
+  for (const entry of split.unreadable) {
+    const where = entry.lines.length === 1 ? `line ${entry.lines[0]}` : `lines ${entry.lines.join(', ')}`;
+    problems.push({
+      code: 'unreadable-frontmatter-value',
+      severity: 'error',
+      message: `frontmatter key "${entry.key}" (line ${entry.line}) could not be read at ${where}; the key is left unset rather than given a wrong value`
     });
   }
 

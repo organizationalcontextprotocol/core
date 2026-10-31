@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const records = require('./records.js');
 
 const VERSION = require('./package.json').version;
 
@@ -111,6 +112,8 @@ const WIKILINK_PATTERN = /\[\[([^\][|]+)(?:\|([^\][]*))?\]\]/g;
  *
  * @typedef {object} SubstratePort
  * @property {(relPath: string) => string} read Read a file as UTF-8. May throw; the walk is fail-soft.
+ * @property {(relPath: string) => Uint8Array} [readBytes] Optional; a file's raw bytes, for the record checks
+ *   (ADR-OCP-007 Appendix A). Without it a record's text is re-encoded, which cannot see invalid UTF-8.
  * @property {(relDir: string) => SubstrateEntry[]} list List a directory. May throw; the walk is fail-soft.
  * @property {() => string | null} [sha] Optional substrate version stamp.
  * @property {(relDir: string) => string | null} [realPath] Optional; lets the walker detect a
@@ -245,7 +248,15 @@ function isReadableNode(node) {
  * @typedef {{ kind: 'file' | 'directory', path: string, reason: string, route?: string }} Discovered
  */
 
-/** @typedef {{ filesSeen: number, directories: number, rendered: number }} WalkStats */
+/** @typedef {{ filesSeen: number, directories: number, rendered: number, records?: number }} WalkStats */
+
+/**
+ * The record pass's report (ADR-OCP-007 section 19): records found, their containers, and every finding. It lives
+ * on the raw tree only; a filtered tree never carries it, so no viewer sees another tenant's record findings.
+ *
+ * @typedef {{ records: number, collections: Array<{ scope: string, corpusClass: string, types: string[] }>,
+ *   problems: Array<{ path: string, code: string, severity: 'error' | 'warning', message: string }> }} RecordReport
+ */
 
 /**
  * The result of {@link walk}. **Unscoped**, so it must not be handed to a
@@ -259,6 +270,7 @@ function isReadableNode(node) {
  * @property {string | null} sha
  * @property {OcpConfig} config
  * @property {WalkStats} stats
+ * @property {RecordReport} [records] The record pass's report; absent from a tree built by hand.
  * @property {Record<string, RequiredScope>} [policy]
  * @property {undefined} [grants] Never present on a raw tree. This is what makes passing
  *   one to {@link project} a compile error rather than only a runtime throw.
@@ -284,6 +296,7 @@ function isReadableNode(node) {
  * @property {WalkStats} stats
  * @property {Record<string, RequiredScope>} policy
  * @property {NormalizedGrants} grants
+ * @property {undefined} [records] Never present: record findings stay on the raw tree.
  * @property {undefined} [tree] Never present; see {@link OcpTree}.
  */
 
@@ -1069,6 +1082,11 @@ function createFileSystemSubstrate(rootDir) {
     read(relPath) {
       return fs.readFileSync(path.join(root, assertSafeRelative(relPath)), 'utf8');
     },
+    // Optional port method: the raw bytes, which the record checks need (a BOM, CRLF and invalid UTF-8 are all
+    // findings, and a text read cannot see the last of them).
+    readBytes(relPath) {
+      return fs.readFileSync(path.join(root, assertSafeRelative(relPath)));
+    },
     list(relDir) {
       const target =
         relDir === '' || relDir === undefined || relDir === null
@@ -1150,6 +1168,13 @@ function walk(substrate, config) {
   /** @type {Record<string, OcpNode>} */
   const byRoute = {};
   let filesSeen = 0;
+  // ADR-OCP-007: `_records/` containers are handed to the record pass, never walked as prose (their shard
+  // directories carry no README, and a record is not an artifact, GB-OCP007-02). Every other non-markdown file is
+  // kept for the placement checks.
+  /** @type {Array<{ scope: string, path: string }>} */
+  const recordContainers = [];
+  /** @type {string[]} */
+  const looseFiles = [];
 
   function listSafe(dir) {
     try {
@@ -1287,7 +1312,10 @@ function walk(substrate, config) {
     for (const entry of entries) {
       if (entry.type === 'file') {
         if (entry.name === ENTRY_POINT) continue;
-        if (!/\.md$/i.test(entry.name)) continue;
+        if (!/\.md$/i.test(entry.name)) {
+          looseFiles.push(posixJoin(dirPath, entry.name));
+          continue;
+        }
         const childParsed = readArtifactSafe(posixJoin(dirPath, entry.name));
         if (!childParsed) continue;
         /** @type {OcpNode} */
@@ -1317,6 +1345,10 @@ function walk(substrate, config) {
         nodes.push(childNode);
         byRoute[childNode.route] = childNode;
         node.children.push(childNode);
+        continue;
+      }
+      if (entry.name === records.RECORDS_DIR) {
+        recordContainers.push({ scope: dirPath, path: posixJoin(dirPath, entry.name) });
         continue;
       }
       // `orgs/` is the recursion edge: its immediate children are child organizations,
@@ -1379,17 +1411,21 @@ function walk(substrate, config) {
     });
   }
 
+  const recordReport = records.checkRecords(substrate, { byRoute }, recordContainers, looseFiles, parseArtifact);
+
   return {
     root,
     nodes,
     byRoute,
     discovered,
+    records: recordReport,
     sha: typeof substrate.sha === 'function' ? substrate.sha() : null,
     config: cfg,
     stats: {
       filesSeen,
       directories: nodes.filter((node) => node.kind !== 'artifact').length,
-      rendered: renderedNodes
+      rendered: renderedNodes,
+      records: recordReport.records
     }
   };
 }
@@ -2195,6 +2231,13 @@ function conformance(tree) {
     );
   }
 
+  // ADR-OCP-007 section 19: the record pass's findings, collected during the walk.
+  if (source.records) {
+    for (const problem of source.records.problems) {
+      problems.push({ path: problem.path, route: problem.path, code: problem.code, severity: problem.severity, message: problem.message });
+    }
+  }
+
   return { ok: problems.every((problem) => problem.severity !== 'error'), problems };
 }
 
@@ -2299,6 +2342,12 @@ function envGrants(env) {
 
 module.exports = {
   VERSION,
+  records: {
+    storedForm: records.storedForm,
+    hashForm: records.hashForm,
+    checkRecordBytes: records.checkRecordBytes,
+    CORPUS_CLASSES: records.CORPUS_CLASSES
+  },
   PROTOCOL,
   ARTIFACT_TYPES,
   ALTITUDES,

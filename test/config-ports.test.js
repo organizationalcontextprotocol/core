@@ -35,6 +35,7 @@ test('the public export surface is stable', () => {
     'parseArtifact',
     'parseVisibility',
     'project',
+    'records',
     'scopedCorpus',
     'walk'
   ]);

@@ -1,5 +1,14 @@
 declare const _exports: {
     VERSION: string;
+    records: {
+        storedForm: (value: unknown) => Buffer;
+        hashForm: (value: unknown) => Buffer;
+        checkRecordBytes: (bytes: Uint8Array, corpusClass: 'fixture' | 'private_client_instance' | 'shared') => {
+            code: string | null;
+            value?: unknown;
+        };
+        CORPUS_CLASSES: readonly string[];
+    };
     PROTOCOL: Readonly<{
         name: "Organizational Context Protocol";
         spec: "ADR-020";
@@ -67,6 +76,11 @@ export type SubstratePort = {
      * Read a file as UTF-8. May throw; the walk is fail-soft.
      */
     read: (relPath: string) => string;
+    /**
+     * Optional; a file's raw bytes, for the record checks
+     * (ADR-OCP-007 Appendix A). Without it a record's text is re-encoded, which cannot see invalid UTF-8.
+     */
+    readBytes?: (relPath: string) => Uint8Array;
     /**
      * List a directory. May throw; the walk is fail-soft.
      */
@@ -228,6 +242,8 @@ export type FilteredNode = OcpNode | OcpStubNode;
  *
  * @typedef {object} SubstratePort
  * @property {(relPath: string) => string} read Read a file as UTF-8. May throw; the walk is fail-soft.
+ * @property {(relPath: string) => Uint8Array} [readBytes] Optional; a file's raw bytes, for the record checks
+ *   (ADR-OCP-007 Appendix A). Without it a record's text is re-encoded, which cannot see invalid UTF-8.
  * @property {(relDir: string) => SubstrateEntry[]} list List a directory. May throw; the walk is fail-soft.
  * @property {() => string | null} [sha] Optional substrate version stamp.
  * @property {(relDir: string) => string | null} [realPath] Optional; lets the walker detect a
@@ -350,6 +366,21 @@ export type WalkStats = {
     filesSeen: number;
     directories: number;
     rendered: number;
+    records?: number;
+};
+export type RecordReport = {
+    records: number;
+    collections: Array<{
+        scope: string;
+        corpusClass: string;
+        types: string[];
+    }>;
+    problems: Array<{
+        path: string;
+        code: string;
+        severity: 'error' | 'warning';
+        message: string;
+    }>;
 };
 export type OcpTree = {
     root: OcpNode;
@@ -359,6 +390,10 @@ export type OcpTree = {
     sha: string | null;
     config: OcpConfig;
     stats: WalkStats;
+    /**
+     * The record pass's report; absent from a tree built by hand.
+     */
+    records?: RecordReport;
     policy?: Record<string, RequiredScope>;
     /**
      * Never present on a raw tree. This is what makes passing
@@ -390,6 +425,10 @@ export type FilteredTree = {
     stats: WalkStats;
     policy: Record<string, RequiredScope>;
     grants: NormalizedGrants;
+    /**
+     * Never present: record findings stay on the raw tree.
+     */
+    records?: undefined;
     /**
      * Never present; see {@link OcpTree}.
      */

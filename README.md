@@ -82,6 +82,24 @@ sales, operations, and support functions without first hiring someone to transla
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
 
+## 0.8.0
+
+> **Behavior change: the frontmatter parser reads what it used to skip, and refuses what it cannot read.**
+> Block scalars (`|`, `>`, with chomping and indentation indicators in either order), wrapped flow sequences and
+> wrapped plain or quoted scalars now read as YAML 1.2 reads them; 0.7.0 stored `">-"`, `"|"`, `{}` or the first line
+> instead. A line the parser still cannot read leaves its top-level key **unset** and records one
+> `unreadable-frontmatter-value` **error** naming the key and its lines, never a wrong value. Single-line flow maps and
+> plain values starting with an indicator character read as before.
+>
+> **New: structured records (ADR-OCP-007).** `walk` hands every `_records/` directory to a record pass instead of
+> walking it as prose, and checks every record's bytes and envelope (ADR-OCP-007 Appendix A, its codes verbatim), its
+> path, id and shard, the corpus class from the tenant root's `configuration.json` (a corpus with no records block
+> holds none), admission, the collection README, and each manifest. A record outside `_records/` is an error, and a
+> data-shaped file outside a registered placement is a warning that becomes an error at 0.9.0. Findings join
+> `conformance()`; the raw tree carries them as `tree.records`, and a filtered tree never does. The filesystem
+> substrate gains `readBytes`, and the package exports `records` (`storedForm`, `hashForm`, `checkRecordBytes`,
+> `CORPUS_CLASSES`). Records are accounted, never rendered or paged into `llmsText`.
+
 ## 0.7.0
 
 > **Behavior change: `_archive/` is no longer walked.** `_archive` joins the default `exclude`
@@ -497,9 +515,10 @@ trustTier, frontmatter, body, links, problems }`.
 
 The frontmatter parser accepts a tolerant YAML subset: quoted and bare scalars, booleans,
 numbers, `null`, inline arrays (respecting quotes), block lists, list-of-maps (`members:`),
-nested maps (`settings:`, `metadata:`), and trailing `# comments`. It strips a leading UTF-8
-BOM, tolerates CRLF, preserves unknown keys verbatim, and skips lines it cannot parse rather
-than failing. `__proto__` is refused rather than assigned.
+nested maps (`settings:`, `metadata:`), block scalars, wrapped flow sequences, wrapped plain and quoted scalars,
+and trailing `# comments`. It strips a leading UTF-8 BOM, tolerates CRLF and preserves unknown keys verbatim. A line it
+cannot read leaves its top-level key unset with an `unreadable-frontmatter-value` error; a stray line outside any key
+is a warning. It never throws. `__proto__` is refused rather than assigned.
 
 `links` extracts `[[wikilink]]` and `[[wikilink|display]]`, ignoring fenced code blocks and
 inline code spans. Extraction and text rewriting share one internal code-segment helper, so the
@@ -507,7 +526,7 @@ two can never disagree about what counts as code.
 
 `problems` is an array of `{ code, severity, message }` with `severity` of `'error'` or
 `'warning'`. Codes: `missing-frontmatter`, `unterminated-frontmatter`,
-`unparsed-frontmatter-lines`, `missing-artifact-type`, `unknown-artifact-type`,
+`unparsed-frontmatter-lines`, `unreadable-frontmatter-value`, `missing-artifact-type`, `unknown-artifact-type`,
 `retired-org-type-field`, `unreadable-source`.
 
 ### `walk(substrate, config) → OcpTree`
@@ -927,7 +946,19 @@ has `severity: 'error'`.
 | `org-missing-core-canon` | error | every `role: org_definition` README carries a Core Canon block (P20) |
 | `org-role-not-declared` | warning | an org README should declare `role: org_definition` |
 | `retired-org-type-field` | warning | `org_type` was retired 2026-07-21 |
+| `unreadable-frontmatter-value` | error | a frontmatter value the parser cannot read is left unset, never stored wrong (0.8.0) |
 | `unterminated-frontmatter` / `unparsed-frontmatter-lines` | warning | tolerated malformation, surfaced rather than hidden |
+| Appendix A codes (`bom_present`, `invalid_unicode`, `crlf_line_ending`, `missing_trailing_lf`, `noncanonical_key_order`, `noncanonical_bytes`, `unknown_envelope_version`, `raw_member`, `closed_profile_extra_key`, `integer_out_of_bounds`, `external_id_not_string`, `key_custody_failure`, `missing_provenance`) | error | a record's bytes and envelope, checked in ADR-OCP-007 Appendix A's order |
+| `record-outside-container` | error | a JSON record sits outside a registered `_records/` container (GB-OCP007-07) |
+| `record-container-not-at-org-scope` | error | `_records/` sits directly in an organization directory, so a record's tenant is its path's (GB-OCP007-03) |
+| `record-in-shared-corpus` | error | a corpus with no records block, or `corpus_class: shared`, holds no records (GB-OCP007-22) |
+| `record-path-invalid` / `record-id-invalid` / `record-shard-mismatch` / `record-id-mismatch` / `record-type-mismatch` | error | the path grammar `<org>/_records/<type>/<shard>/<id>.json` (ADR-OCP-007 §5, §7) |
+| `record-type-not-admitted` | error | the tenant root's `configuration.json` admits the type |
+| `record-collection-missing-readme` / `record-collection-role` / `record-collection-type-mismatch` / `record-collection-kind-invalid` | error | each collection root's README declares `role: record_collection`, its type and a record kind, 2 or 3 (GB-OCP007-05) |
+| `record-major-mismatch` / `record-profile-not-admitted` / `record-pointer-invalid` | error | a record's major, profile and pointers agree with its collection (GB-OCP007-08) |
+| `record-manifest-invalid` | error | a manifest is canonical and carries exactly its keys (ADR-OCP-007 §11.3) |
+| `records-corpus-class-invalid` / `configuration-unparseable` | error | the records block names a known corpus class |
+| `data-file-unregistered-placement` | warning | a `.json .jsonl .ndjson .csv .tsv .parquet` file outside a registered placement; an error at 0.9.0 (GB-OCP007-17) |
 | `root-entry-misplaced` | warning | a substrate-root entry that is neither a substrate dir, a content dir, nor `README.md` / `AGENTS.md` / `DISCOVERED.md` (ADR-020 §14.7 R3) |
 
 Each problem is `{ path, route, code, severity, message }`.
@@ -1074,8 +1105,7 @@ across artifacts; and nothing in this package enforces that a consumer actually 
 ## Status
 
 Source lives in [organizationalcontextprotocol/core](https://github.com/organizationalcontextprotocol/core).
-The package is on npm at `0.6.x` while the protocol documentation and the reference renderer are
-built out. Expect breaking changes at every minor version until `1.0`.
+The package is on npm while the protocol documentation and the reference renderer are built out. Expect breaking changes at every minor version until `1.0`.
 
 ## Related
 

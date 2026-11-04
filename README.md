@@ -25,9 +25,9 @@ write, with role-based access that follows the organizational structure instead 
 by hand afterward. No integration, no parsing library, no vendor client, because the substrate is
 just markdown in git and the conventions are published where the agent can read them.
 
-The material published there is not illustrative. It is the SOPs, templates, and agent context
-actually running SalesBlaster and its white-label partners, alongside the assets generated
-downstream of them — AI voice agents, AI SDRs, B-roll, content strategy.
+The material published there is not illustrative. It is the SOPs, templates, and agent context of
+working organizations, alongside the assets generated downstream of them: AI voice agents, AI SDRs,
+B-roll, content strategy.
 
 That is the adoption thesis in one URL: **discovery, understanding, and implementation at the
 same address, for humans and agents alike.**

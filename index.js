@@ -2635,14 +2635,18 @@ function envGrants(env) {
   };
 }
 
+// The records API is bound to a name first: an object literal nested inside `module.exports = { ... }` stops Node's
+// CommonJS export detection, so an ES module importing `ocp-core` would see only the names before it.
+const recordsApi = {
+  storedForm: records.storedForm,
+  hashForm: records.hashForm,
+  checkRecordBytes: records.checkRecordBytes,
+  CORPUS_CLASSES: records.CORPUS_CLASSES
+};
+
 module.exports = {
   VERSION,
-  records: {
-    storedForm: records.storedForm,
-    hashForm: records.hashForm,
-    checkRecordBytes: records.checkRecordBytes,
-    CORPUS_CLASSES: records.CORPUS_CLASSES
-  },
+  records: recordsApi,
   PROTOCOL,
   ARTIFACT_TYPES,
   ALTITUDES,

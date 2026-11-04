@@ -36,7 +36,7 @@ test('Appendix A: every reject fixture names its code', () => {
   }
 });
 
-test('LO-186: an integer a double cannot hold names noncanonical_bytes, and 2^53 names integer_out_of_bounds', () => {
+test('an integer a double cannot hold names noncanonical_bytes, and 2^53 names integer_out_of_bounds', () => {
   const at = (n) => Buffer.from(`{\n  "$ocp": {\n    "id": "k0_84c457c82b198395164cc59bc9a41f74",\n    "major": 1,\n    "provenance": "fixture",\n    "record_type": "deal"\n  },\n  "data": {\n    "q": ${n}\n  }\n}\n`);
   assert.equal(ocp.records.checkRecordBytes(at('9007199254740993'), 'fixture').code, 'noncanonical_bytes');
   assert.equal(ocp.records.checkRecordBytes(at('9007199254740992'), 'fixture').code, 'integer_out_of_bounds');

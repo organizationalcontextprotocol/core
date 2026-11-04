@@ -1,5 +1,5 @@
 {
-  "source": "ADR-OCP-007 Appendix A, aios lane/uop-contracts 383666c (0.5.0)",
+  "source": "ADR-OCP-007 Appendix A (0.5.0)",
   "fixtures": [
     {
       "fixture": "accept-projected",

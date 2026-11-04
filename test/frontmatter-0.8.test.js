@@ -1,6 +1,6 @@
 'use strict';
 
-// 0.8.0 frontmatter parser (hub LO-112). Two rules:
+// 0.8.0 frontmatter parser. Two rules:
 //   1. A wrapped value reads exactly as it would on one line; block scalars follow YAML 1.2 §8.1.
 //   2. Unreadable is an error, never a wrong value: the top-level key is left unset and one
 //      `unreadable-frontmatter-value` error names it with its file line numbers.

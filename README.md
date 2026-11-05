@@ -4,9 +4,13 @@
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/organizationalcontextprotocol/core/blob/main/LICENSE)
 [![node](https://img.shields.io/badge/node-%3E%3D20-brightgreen.svg)](https://nodejs.org)
 
-`ocp-core` is the projection library for the **Organizational Context Protocol** — an open
-specification for how an organization exposes its structure, knowledge, and access rules to AI
-agents.
+`ocp-core` is the projection library for the **Organizational Context Protocol**: it walks a
+git-native markdown substrate, derives access policy, produces scoped projections, and validates
+conformance.
+
+## OCP: A Protocol for Organizational Knowledge Representation and Governance
+
+The Organizational Context Protocol (OCP) specifies how organizational knowledge is represented, structured, versioned, and governed in a shared, machine-readable form for humans and AI agents.
 
 ## Start at [ocp.wiki](https://ocp.wiki)
 
@@ -81,6 +85,10 @@ not sit behind a consultancy retainer: a business ought to be able to equip its 
 sales, operations, and support functions without first hiring someone to translate its knowledge
 into a machine-readable shape. A protocol costs nothing to adopt and behaves identically for a
 two-person shop and for a platform serving hundreds of accounts.
+
+## 0.8.1
+
+Docs only: an OCP overview at the top of this README and the short OCP description in the npm summary. No behavior change.
 
 ## 0.8.0
 
